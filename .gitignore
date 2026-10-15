@@ -1,0 +1,7 @@
+/build-*/
+/dependencies/
+*.log
+*.ppm
+*.aus
+*.h264
+autoplay.txt

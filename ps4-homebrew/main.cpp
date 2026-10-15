@@ -1,0 +1,1713 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// PS4 device-code sign-in milestone for the Xbox Cloud homebrew.
+#include "auth/msa.h"
+#include "auth/xbox_live.h"
+#include "gpu_wsi.h"
+#include "network.h"
+#include "net/http.h"
+#include "xcloud_login.h"
+#include "ui/brand.h"
+#include "ui/canvas.h"
+#include "ui/font.h"
+#include "qrcodegen.h"
+#include "xcloud/gssv.h"
+#include "ui/app_ui.h"
+#include "ui/image_cache.h"
+#include "video_decoder.h"
+#include "stream/stream_session.h"
+#include "platform/platform.h"
+#include "util/json.h"
+#include "util/log.h"
+
+#include <orbis/libkernel.h>
+#include <orbis/Sysmodule.h>
+#include <orbis/Pad.h>
+#include <orbis/UserService.h>
+#include <SDL3/SDL.h>
+
+#include <pthread.h>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cctype>
+#include <cstdarg>
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
+#include <memory>
+#include <string>
+#include <sys/stat.h>
+#include <vector>
+
+namespace {
+constexpr const char* kLogDirectory = "/data/PSBOX";
+constexpr const char* kAppLogPath = "/data/PSBOX/xcloud.log";
+
+void logLine(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(body, sizeof(body), fmt, ap);
+    va_end(ap);
+    std::snprintf(line, sizeof(line), "[%s] %s\n", kBuild, body);
+}
+
+struct StreamProfile {
+    std::string tier = "720";
+    uint32_t lastQueueMax = 0;
+    uint32_t lastDecodeAvgUs = 0;
+    uint32_t lastConvertAvgUs = 0;
+    uint32_t lastSkipPermille = 0;
+};
+
+constexpr const char* kStreamProfilePath = "/data/PSBOX/stream_profile.json";
+constexpr uint32_t k1080Bitrate = 25000000;
+};
+
+uint32_t normalizeBitrate(uint64_t bitrate) {
+    uint32_t best = kSelectableBitrates.front();
+    uint64_t distance = bitrate > best ? bitrate - best : best - bitrate;
+    for (uint32_t candidate : kSelectableBitrates) {
+        const uint64_t nextDistance = bitrate > candidate ? bitrate - candidate : candidate - bitrate;
+        if (nextDistance < distance) {
+            best = candidate;
+            distance = nextDistance;
+        }
+    }
+    return best;
+}
+
+const char* tierLabel(const std::string& tier) { return tier == "1080" ? "1080p" : "720p"; }
+
+StreamProfile loadStreamProfile() {
+    StreamProfile profile;
+    std::string text;
+    if (!xc::platform::readFile(kStreamProfilePath, text)) {
+        return profile;
+    }
+    std::string error;
+    auto parsed = xc::json::parse(text, &error);
+        ((*parsed)["tier"].str() != "720" && (*parsed)["tier"].str() != "1080")) {
+        return profile;
+    }
+    profile.tier = (*parsed)["tier"].str();
+    const int64_t storedBitrate = (*parsed)["max_bitrate"].asInt();
+    profile.maxBitrate = storedBitrate > 0
+        ? normalizeBitrate(static_cast<uint64_t>(storedBitrate))
+    profile.lastDecodeAvgUs = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["decode_avg_us"].asInt(), 0, 1000000));
+    profile.lastConvertAvgUs = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["convert_avg_us"].asInt(), 0, 1000000));
+    profile.lastSkipPermille = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["skip_permille"].asInt(), 0, 1000));
+            profile.lastDecodeAvgUs / 1000.0, profile.lastConvertAvgUs / 1000.0,
+            profile.lastSkipPermille / 10.0);
+    return profile;
+}
+
+bool saveStreamProfile(const StreamProfile& profile) {
+    xc::json::Value value = xc::json::Value::object();
+    value.set("tier", profile.tier);
+    value.set("max_bitrate", static_cast<int64_t>(profile.maxBitrate));
+    value.set("queue_max", static_cast<int64_t>(profile.lastQueueMax));
+    value.set("decode_avg_us", static_cast<int64_t>(profile.lastDecodeAvgUs));
+    value.set("convert_avg_us", static_cast<int64_t>(profile.lastConvertAvgUs));
+    value.set("skip_permille", static_cast<int64_t>(profile.lastSkipPermille));
+    if (!xc::platform::writeFileAtomic(kStreamProfilePath, value.dump())) {
+        logLine("stream profile cache write failed path=%s", kStreamProfilePath);
+        return false;
+    }
+            profile.lastSkipPermille / 10.0);
+    return true;
+}
+
+enum class LoginStage {
+    Starting, CheckingSaved, Refreshing, ShowingCode, XboxLive, Xcloud, Library,
+};
+
+const char* loginStageName(LoginStage stage) {
+    switch (stage) {
+    case LoginStage::Starting: return "starting";
+    case LoginStage::CheckingSaved: return "checking-saved-account";
+    case LoginStage::Refreshing: return "refreshing-account";
+    case LoginStage::ShowingCode: return "device-code";
+    case LoginStage::XboxLive: return "xbox-live";
+    case LoginStage::Xcloud: return "xcloud-login";
+    case LoginStage::Library: return "library";
+    case LoginStage::SessionStarting: return "session-starting";
+    case LoginStage::SessionProvisioning: return "session-provisioning";
+    case LoginStage::SessionReady: return "session-ready";
+    case LoginStage::Streaming: return "streaming";
+    case LoginStage::Failed: return "failed";
+    case LoginStage::Expired: return "expired";
+    case LoginStage::Denied: return "denied";
+    }
+    return "unknown";
+}
+
+}
+
+constexpr const char* kTransferScope =
+    "service::http://Passport.NET/purpose::PURPOSE_XBOX_CLOUD_CONSOLE_TRANSFER_TOKEN";
+
+class Controller {
+public:
+    bool initialize() {
+        const int32_t userModule = static_cast<int32_t>(sceSysmoduleLoadModuleInternal(
+            ORBIS_SYSMODULE_INTERNAL_USER_SERVICE));
+        const int32_t padModule = static_cast<int32_t>(sceSysmoduleLoadModuleInternal(
+            ORBIS_SYSMODULE_INTERNAL_PAD));
+        if (userModule < 0 || padModule < 0) {
+            logLine("scePad module load failed user=0x%x pad=0x%x",
+                    static_cast<unsigned>(userModule), static_cast<unsigned>(padModule));
+            return false;
+        }
+        const int32_t userInit = sceUserServiceInitialize(nullptr);
+        logLine("sceUserServiceInitialize rc=0x%x", static_cast<unsigned>(userInit));
+        const int32_t padInit = scePadInit();
+        if (padInit < 0) {
+            logLine("scePadInit failed rc=0x%x", static_cast<unsigned>(padInit));
+            return false;
+        }
+        padInitialized_ = true;
+        pump();
+        logLine("scePad input initialized user_module=0x%x pad_module=0x%x handle=%d",
+                static_cast<unsigned>(userModule), static_cast<unsigned>(padModule), handle_);
+        return true;
+    }
+
+    ~Controller() {
+        if (handle_ >= 0 && ownsHandle_) scePadClose(handle_);
+    }
+
+    void pump() {
+        std::lock_guard<std::mutex> pumpLock(pumpMutex_);
+        if (!padInitialized_) return;
+        if (handle_ < 0) {
+            const uint64_t now = sceKernelGetProcessTime();
+            if (now >= nextOpenAt_) openPad(now);
+            return;
+        }
+
+        OrbisPadData next{};
+        const int rc = scePadReadState(handle_, &next);
+        if (rc < 0) {
+            logLine("scePadReadState failed rc=0x%x; retrying", static_cast<unsigned>(rc));
+            closePad();
+            nextOpenAt_ = sceKernelGetProcessTime() + 1000000;
+            {
+                std::lock_guard<std::mutex> stateLock(stateMutex_);
+                state_ = {};
+            }
+            return;
+        }
+        if (!next.connected) {
+            bool wasConnected = false;
+            {
+                std::lock_guard<std::mutex> stateLock(stateMutex_);
+                wasConnected = state_.connected;
+                state_ = {};
+            }
+            if (wasConnected) logLine("scePad controller disconnected");
+            connectedLogged_ = false;
+            return;
+        }
+
+        OrbisPadData previous{};
+        {
+            std::lock_guard<std::mutex> stateLock(stateMutex_);
+            previous = state_;
+            state_ = next;
+        }
+        const uint32_t previousButtons = previous.buttons;
+        const int oldLX = axisBucket(previous.leftStick.x);
+        const int oldLY = axisBucket(previous.leftStick.y);
+        const int newLX = axisBucket(next.leftStick.x);
+        const int newLY = axisBucket(next.leftStick.y);
+        if (!connectedLogged_) {
+            logLine("scePad controller connected handle=%d", handle_);
+            connectedLogged_ = true;
+        }
+        if (next.buttons != previousButtons) {
+            logLine("scePad buttons=0x%08x", static_cast<unsigned>(next.buttons));
+        }
+        if ((newLX != oldLX || newLY != oldLY) && (newLX || newLY || oldLX || oldLY)) {
+            logLine("scePad left_stick x=%u y=%u", next.leftStick.x, next.leftStick.y);
+        }
+    }
+
+    bool button(SDL_GamepadButton button) const {
+        uint32_t mask = 0;
+        switch (button) {
+        case SDL_GAMEPAD_BUTTON_SOUTH: mask = ORBIS_PAD_BUTTON_CROSS; break;
+        case SDL_GAMEPAD_BUTTON_EAST: mask = ORBIS_PAD_BUTTON_CIRCLE; break;
+        case SDL_GAMEPAD_BUTTON_WEST: mask = ORBIS_PAD_BUTTON_SQUARE; break;
+        case SDL_GAMEPAD_BUTTON_NORTH: mask = ORBIS_PAD_BUTTON_TRIANGLE; break;
+        case SDL_GAMEPAD_BUTTON_START: mask = ORBIS_PAD_BUTTON_OPTIONS; break;
+        case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: mask = ORBIS_PAD_BUTTON_L1; break;
+        case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: mask = ORBIS_PAD_BUTTON_R1; break;
+        case SDL_GAMEPAD_BUTTON_LEFT_STICK: mask = ORBIS_PAD_BUTTON_L3; break;
+        case SDL_GAMEPAD_BUTTON_RIGHT_STICK: mask = ORBIS_PAD_BUTTON_R3; break;
+        case SDL_GAMEPAD_BUTTON_DPAD_UP: mask = ORBIS_PAD_BUTTON_UP; break;
+        case SDL_GAMEPAD_BUTTON_DPAD_DOWN: mask = ORBIS_PAD_BUTTON_DOWN; break;
+        case SDL_GAMEPAD_BUTTON_DPAD_LEFT: mask = ORBIS_PAD_BUTTON_LEFT; break;
+        case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: mask = ORBIS_PAD_BUTTON_RIGHT; break;
+        case SDL_GAMEPAD_BUTTON_TOUCHPAD: mask = ORBIS_PAD_BUTTON_TOUCH_PAD; break;
+        default: return false;
+        }
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        return state_.connected && (state_.buttons & mask) != 0;
+    }
+    float axis(SDL_GamepadAxis axis) const {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        if (!state_.connected) return 0.0f;
+        uint8_t value = 128;
+        switch (axis) {
+        case SDL_GAMEPAD_AXIS_LEFTX: value = state_.leftStick.x; break;
+        case SDL_GAMEPAD_AXIS_LEFTY: value = state_.leftStick.y; break;
+        case SDL_GAMEPAD_AXIS_RIGHTX: value = state_.rightStick.x; break;
+        case SDL_GAMEPAD_AXIS_RIGHTY: value = state_.rightStick.y; break;
+        case SDL_GAMEPAD_AXIS_LEFT_TRIGGER:
+            return static_cast<float>(state_.analogButtons.l2) / 255.0f;
+        case SDL_GAMEPAD_AXIS_RIGHT_TRIGGER:
+            return static_cast<float>(state_.analogButtons.r2) / 255.0f;
+        default: return 0.0f;
+        }
+        if (value >= 126 && value <= 130) return 0.0f;
+        return value < 128 ? (static_cast<float>(value) - 128.0f) / 128.0f
+                           : (static_cast<float>(value) - 128.0f) / 127.0f;
+    }
+
+private:
+    static int axisBucket(uint8_t value) {
+        if (value < 72) return -1;
+        if (value > 184) return 1;
+        return 0;
+    }
+
+    void openPad(uint64_t now) {
+        nextOpenAt_ = now + 1000000;
+        int32_t user = -1;
+        const int userRc = sceUserServiceGetInitialUser(&user);
+        if (userRc < 0) {
+            if (!openErrorLogged_) logLine("sceUserServiceGetInitialUser failed rc=0x%x", static_cast<unsigned>(userRc));
+            openErrorLogged_ = true;
+            return;
+        }
+        handle_ = scePadOpen(user, ORBIS_PAD_PORT_TYPE_STANDARD, 0, nullptr);
+        ownsHandle_ = handle_ >= 0;
+        if (handle_ < 0) handle_ = scePadGetHandle(user, ORBIS_PAD_PORT_TYPE_STANDARD, 0);
+        if (handle_ < 0) {
+            if (!openErrorLogged_) logLine("scePadOpen/GetHandle failed user=%d rc=0x%x", user, static_cast<unsigned>(handle_));
+            openErrorLogged_ = true;
+            return;
+        }
+        openErrorLogged_ = false;
+        logLine("scePad opened user=%d handle=%d owned=%d", user, handle_, ownsHandle_ ? 1 : 0);
+    }
+
+    void closePad() {
+        if (handle_ >= 0 && ownsHandle_) scePadClose(handle_);
+        handle_ = -1;
+        ownsHandle_ = false;
+        connectedLogged_ = false;
+    }
+
+    OrbisPadData state_{};
+    mutable std::mutex stateMutex_;
+    std::mutex pumpMutex_;
+    int32_t handle_ = -1;
+    uint64_t nextOpenAt_ = 0;
+    bool padInitialized_ = false;
+    bool ownsHandle_ = false;
+    bool connectedLogged_ = false;
+    bool openErrorLogged_ = false;
+};
+
+constexpr const char* kTokenDirectory = "/data/XCHM00001";
+constexpr const char* kRefreshTokenPath = "/data/XCHM00001/msa_refresh_token.txt";
+
+bool readRefreshToken(std::string& token, int& errorCode) {
+    token.clear();
+    FILE* file = std::fopen(kRefreshTokenPath, "rb");
+    if (!file) {
+        errorCode = errno;
+        return false;
+    }
+    char buffer[4096];
+    const size_t count = std::fread(buffer, 1, sizeof(buffer), file);
+    const bool tooLarge = count == sizeof(buffer) && std::fgetc(file) != EOF;
+    const bool ok = !tooLarge && std::ferror(file) == 0;
+    errorCode = ok ? 0 : (tooLarge ? EFBIG : EIO);
+    std::fclose(file);
+    if (!ok) {
+        std::memset(buffer, 0, sizeof(buffer));
+        return false;
+    }
+    token.assign(buffer, count);
+    std::memset(buffer, 0, sizeof(buffer));
+    while (!token.empty() && (token.back() == '\n' || token.back() == '\r')) token.pop_back();
+    return !token.empty();
+}
+
+bool saveRefreshToken(const std::string& token, int& errorCode) {
+    if (token.empty()) {
+        errorCode = EINVAL;
+        return false;
+    }
+    if (mkdir(kTokenDirectory, 0700) != 0 && errno != EEXIST) {
+        errorCode = errno;
+        return false;
+    }
+    if (chmod(kTokenDirectory, 0700) != 0) {
+        errorCode = errno;
+        return false;
+    }
+    errorCode = 0;
+    const std::string temporary = std::string(kRefreshTokenPath) + ".tmp";
+    FILE* file = std::fopen(temporary.c_str(), "wb");
+    if (!file) {
+        errorCode = errno;
+        return false;
+    }
+    bool ok = std::fwrite(token.data(), 1, token.size(), file) == token.size();
+    if (!ok) errorCode = errno ? errno : EIO;
+    ok = (std::fflush(file) == 0) && ok;
+    if (!ok && errorCode == 0) errorCode = errno ? errno : EIO;
+    ok = (std::fclose(file) == 0) && ok;
+    if (!ok && errorCode == 0) errorCode = errno ? errno : EIO;
+    if (ok && chmod(temporary.c_str(), 0600) != 0) {
+        ok = false;
+        errorCode = errno;
+    }
+    if (ok && std::rename(temporary.c_str(), kRefreshTokenPath) != 0) {
+        ok = false;
+        errorCode = errno;
+    }
+    if (!ok) std::remove(temporary.c_str());
+    else errorCode = 0;
+    return ok;
+}
+
+void clearRefreshTokenCache() {
+    std::remove(kRefreshTokenPath);
+}
+
+struct LoginState {
+    std::mutex mutex;
+    LoginStage stage = LoginStage::Starting;
+    std::string verificationUri;
+    std::string verificationUriComplete;
+    std::string userCode;
+    std::string error;
+    std::string market;
+    std::string region;
+    std::string gamertag;
+    bool libraryLoading = false;
+    size_t libraryLoaded = 0;
+    uint64_t libraryRevision = 0;
+    std::shared_ptr<xc::xcloud::GssvClient> gssv;
+    std::string refreshToken;
+    std::string sessionMessage;
+    bool stopSessionRequested = false;
+    bool streamTransportLost = false;
+    std::string streamTier = "720";
+    uint32_t streamBitrateCap = k720Bitrate;
+    uint32_t streamRembEstimate = 0;
+    uint32_t streamReceiveRate = 0;
+    int streamRttMs = -1;
+    uint32_t streamWidth = 0, streamHeight = 0;
+    uint32_t streamNewVideoFps = 0, streamPublishedFps = 0;
+    uint32_t streamQueueDepth = 0, streamQueuePeak = 0;
+    uint32_t streamQueueWaitAvgUs = 0, streamQueueWaitMaxUs = 0;
+    uint32_t streamDecodeAvgUs = 0, streamConvertAvgUs = 0;
+    uint64_t streamStatsGeneration = 0;
+    bool streamSettingsOpen = false;
+    uint8_t streamSettingsRow = 0;
+    std::string streamDraftTier = "720";
+    uint32_t streamDraftBitrate = k720Bitrate;
+    size_t selectedTitle = 0;
+    int expiresInSec = 0;
+    uint64_t generation = 1;
+};
+
+struct LoginSnapshot {
+    LoginStage stage;
+    std::string verificationUri;
+    std::string verificationUriComplete;
+    std::string userCode;
+    std::string error;
+    std::string market;
+    std::string region;
+    std::string gamertag;
+    std::string sessionMessage;
+    size_t selectedTitle;
+    int expiresInSec;
+    uint64_t generation;
+    bool libraryLoading;
+    size_t libraryLoaded;
+    uint64_t libraryRevision;
+    bool streamTransportLost;
+    std::string streamTier;
+    uint32_t streamBitrateCap;
+    uint32_t streamRembEstimate;
+    uint32_t streamReceiveRate;
+    int streamRttMs;
+    uint32_t streamWidth, streamHeight;
+    uint32_t streamNewVideoFps, streamPublishedFps;
+    uint32_t streamQueueDepth, streamQueuePeak;
+    uint32_t streamQueueWaitAvgUs, streamQueueWaitMaxUs;
+    uint32_t streamDecodeAvgUs, streamConvertAvgUs;
+    uint64_t streamStatsGeneration;
+    bool streamSettingsOpen;
+    uint8_t streamSettingsRow;
+    std::string streamDraftTier;
+    uint32_t streamDraftBitrate;
+};
+
+    std::lock_guard<std::mutex> lock(state.mutex);
+    return {state.stage, state.verificationUri, state.verificationUriComplete, state.userCode, state.error,
+            state.expiresInSec, state.generation, state.libraryLoading, state.libraryLoaded,
+            state.streamBitrateCap, state.streamRembEstimate, state.streamReceiveRate,
+            state.streamRttMs, state.streamWidth, state.streamHeight,
+            state.streamNewVideoFps, state.streamPublishedFps, state.streamQueueDepth,
+            state.streamQueuePeak, state.streamQueueWaitAvgUs, state.streamQueueWaitMaxUs,
+            state.streamDecodeAvgUs, state.streamConvertAvgUs, state.streamStatsGeneration,
+}
+
+void setStage(LoginState& state, LoginStage stage, const std::string& error = {}) {
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.stage = stage;
+        state.error = error;
+        ++state.generation;
+    }
+    logLine("login progress stage=%s error_present=%d", loginStageName(stage), error.empty() ? 0 : 1);
+}
+
+void wipe(std::string& s) {
+    volatile char* p = s.empty() ? nullptr : &s[0];
+    for (size_t i = 0; i < s.size(); ++i) p[i] = 0;
+    s.clear();
+}
+
+void wipeToken(xc::auth::XblToken& token) {
+    wipe(token.token);
+    wipe(token.userHash);
+    wipe(token.gamertag);
+    wipe(token.xuid);
+    wipe(token.notAfter);
+}
+
+bool finishXboxLogin(LoginState& state, xc::auth::MsaTokens& msaTokens) {
+    std::string refreshToken = msaTokens.refreshToken;
+    setStage(state, LoginStage::XboxLive);
+    logLine("xbox live user authentication started");
+
+    xc::auth::XblToken userToken;
+    std::string error;
+    const bool userOk = xc::auth::xblUserToken(msaTokens.accessToken, "d=", userToken, error);
+    wipe(msaTokens.accessToken);
+    wipe(msaTokens.refreshToken);
+    wipe(msaTokens.userId);
+    if (!userOk) {
+        logLine("xbox live user authentication failed: %s", error.c_str());
+        setStage(state, LoginStage::Failed, error);
+        wipeToken(userToken);
+        return false;
+    }
+    const std::string gamertag = userToken.gamertag;
+    logLine("xbox live user authentication complete");
+
+    xc::auth::XblToken gssvXsts;
+    if (!xc::auth::xstsToken(userToken, xc::auth::rp::kGssv, gssvXsts, error)) {
+        logLine("xsts authorization for xcloud failed: %s", error.c_str());
+        setStage(state, LoginStage::Failed, error);
+        wipeToken(userToken);
+        wipeToken(gssvXsts);
+        return false;
+    }
+    wipeToken(userToken);
+    logLine("xsts authorization for xcloud complete");
+
+    setStage(state, LoginStage::Xcloud);
+    logLine("xcloud GSSV login started offering=xgpuweb");
+    xc::ps4::XcloudLoginInfo info;
+    bool libraryPublished = false;
+    auto publishLibrary = [&](const xc::ps4::XcloudLoginInfo& update, bool complete) {
+        size_t count = update.titles.size();
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            if (state.stage == LoginStage::Xcloud || state.stage == LoginStage::Library)
+                state.stage = LoginStage::Library;
+            state.error.clear();
+            state.market = update.market;
+            state.region = update.region;
+            state.gamertag = gamertag;
+            state.gssv = update.client;
+            if (state.refreshToken.empty()) state.refreshToken = refreshToken;
+            if (!libraryPublished) {
+                state.selectedTitle = 0;
+                state.sessionMessage.clear();
+            }
+            state.libraryLoading = !complete;
+            ++state.libraryRevision;
+            ++state.generation;
+        }
+        libraryPublished = true;
+    };
+    if (!xc::ps4::loginXcloud(gssvXsts, info, error, publishLibrary)) {
+        logLine("xcloud GSSV login failed: %s", error.c_str());
+        if (libraryPublished) {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.libraryLoading = false;
+            if (state.stage == LoginStage::Library) state.error = error;
+            ++state.generation;
+                    state.libraryLoaded);
+        } else {
+            setStage(state, LoginStage::Failed, error);
+        }
+        wipeToken(gssvXsts);
+        wipe(refreshToken);
+        return libraryPublished;
+    }
+    wipeToken(gssvXsts);
+    wipe(refreshToken);
+            info.market.c_str(), info.region.c_str(), info.regionCount, info.titles.size(),
+    if (!info.catalogWarning.empty())
+        logLine("catalog artwork/name lookup warning: %s", info.catalogWarning.c_str());
+    return true;
+}
+
+void updateSession(LoginState& state, LoginStage stage, const std::string& message,
+                   const std::string& error = {}) {
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.stage = stage;
+        state.sessionMessage = message;
+        state.error = error;
+        ++state.generation;
+    }
+    logLine("session progress stage=%s detail=%s error_present=%d",
+            loginStageName(stage), message.empty() ? "(none)" : message.c_str(), error.empty() ? 0 : 1);
+}
+
+struct SessionJob {
+    LoginState* state;
+    std::shared_ptr<xc::xcloud::GssvClient> gssv;
+    std::string titleId;
+    std::string refreshToken;
+    std::string titleName;
+    xc::ps4::VideoDecoder* video = nullptr;
+    Controller* controller = nullptr;
+};
+
+xc::stream::GamepadFrame readStreamGamepad(const Controller& controller);
+
+void* sessionWorker(void* opaque) {
+    std::unique_ptr<SessionJob> job(static_cast<SessionJob*>(opaque));
+    auto& state = *job->state;
+    std::string error;
+    StreamProfile streamProfile = loadStreamProfile();
+    logLine("session setup started title=%s title_id=%s", job->titleName.c_str(), job->titleId.c_str());
+    if (job->gssv) {
+        job->gssv->setResolution(streamProfile.tier == "1080"
+            ? xc::xcloud::Resolution::P1080 : xc::xcloud::Resolution::P720);
+        logLine("cloud session profile requested=%s bitrate_cap=%u resolution_policy=user_selected_persistent",
+                tierLabel(streamProfile.tier), streamProfile.maxBitrate);
+    }
+    if (!job->gssv || !job->gssv->startSession(job->titleId, "en-US", error)) {
+        updateSession(state, LoginStage::Failed, {}, error.empty() ? "Could not start the cloud session." : error);
+        logLine("session start failed: %s", error.c_str());
+        wipe(job->refreshToken);
+        return nullptr;
+    }
+    updateSession(state, LoginStage::SessionProvisioning, "Request accepted; checking cloud capacity...");
+
+    bool connected = false;
+    int pollErrors = 0;
+    std::string lastRawState;
+    for (int attempt = 0; attempt < 600; ++attempt) {
+        xc::xcloud::SessionStatus status;
+        error.clear();
+        if (!job->gssv->sessionState(status, error)) {
+            if (++pollErrors >= 3) {
+                updateSession(state, LoginStage::Failed, {}, error);
+                logLine("session status failed after retries: %s", error.c_str());
+                job->gssv->stopSession();
+                wipe(job->refreshToken);
+                return nullptr;
+            }
+            sceKernelUsleep(1000000);
+            continue;
+        }
+        pollErrors = 0;
+        if (status.raw != lastRawState) {
+            logLine("session state=%s", status.raw.c_str());
+            lastRawState = status.raw;
+            updateSession(state, LoginStage::SessionProvisioning,
+                          "Cloud service state: " + status.raw);
+        }
+        if (status.state == xc::xcloud::SessionState::Failed) {
+            const std::string message = status.errorCode + " " + status.errorMessage;
+            updateSession(state, LoginStage::Failed, {}, message.empty() ? "The cloud session failed." : message);
+            job->gssv->stopSession();
+            wipe(job->refreshToken);
+            return nullptr;
+        }
+        if (status.state == xc::xcloud::SessionState::WaitingForResources) {
+            if (attempt % 15 == 0) {
+                char message[128];
+                const int wait = job->gssv->waitTimeSeconds();
+                if (wait >= 0) std::snprintf(message, sizeof(message), "Waiting in cloud queue (estimate: %d sec)", wait);
+                else std::snprintf(message, sizeof(message), "Waiting for cloud capacity...");
+                updateSession(state, LoginStage::SessionProvisioning, message);
+            }
+        } else if (status.state == xc::xcloud::SessionState::ReadyToConnect && !connected) {
+            updateSession(state, LoginStage::SessionProvisioning, "Cloud host ready; completing console authorization...");
+            xc::auth::MsaConfig config;
+            xc::auth::MsaClient msa(std::move(config));
+            xc::auth::MsaTokens transfer;
+            if (!msa.refresh(job->refreshToken, transfer, error, kTransferScope)) {
+                updateSession(state, LoginStage::Failed, {}, "Console-transfer authorization failed: " + error);
+                logLine("console-transfer token request failed: %s", error.c_str());
+                job->gssv->stopSession();
+                wipe(job->refreshToken);
+                return nullptr;
+            }
+            int cacheError = 0;
+            if (!transfer.refreshToken.empty() && saveRefreshToken(transfer.refreshToken, cacheError)) {
+                wipe(job->refreshToken);
+                job->refreshToken = transfer.refreshToken;
+                std::lock_guard<std::mutex> lock(state.mutex);
+                wipe(state.refreshToken);
+                state.refreshToken = transfer.refreshToken;
+            }
+            if (!job->gssv->connect(transfer.accessToken, error)) {
+                wipe(transfer.accessToken);
+                wipe(transfer.refreshToken);
+                updateSession(state, LoginStage::Failed, {}, error);
+                logLine("session connect failed: %s", error.c_str());
+                job->gssv->stopSession();
+                wipe(job->refreshToken);
+                return nullptr;
+            }
+            wipe(transfer.accessToken);
+            wipe(transfer.refreshToken);
+            connected = true;
+            logLine("session connect authorization complete");
+        } else if (status.state == xc::xcloud::SessionState::Provisioned) {
+            updateSession(state, LoginStage::SessionProvisioning,
+                          "Session ready; starting H.264 transport and PS4 decoder...");
+            logLine("session provisioned; retaining session and starting WebRTC video");
+
+            updateSession(state, LoginStage::SessionProvisioning,
+                          "Initializing the PS4 H.264 decoder...");
+            logLine("H.264 decoder initialization begin");
+            if (!job->video || !job->video->start()) {
+                const std::string message = "PS4 Videodec2 initialization failed.";
+                logLine("video decoder initialization failed");
+                job->gssv->stopSession();
+                updateSession(state, LoginStage::Failed, {}, message);
+                wipe(job->refreshToken);
+                return nullptr;
+            }
+            logLine("H.264 decoder initialization complete");
+
+            xc::stream::StreamCallbacks callbacks;
+            callbacks.progress = [&state](const std::string& detail) {
+                bool streamUiActive = false;
+                {
+                    std::lock_guard<std::mutex> lock(state.mutex);
+                    streamUiActive = state.stage == LoginStage::Streaming;
+                }
+                if (!streamUiActive)
+                    updateSession(state, LoginStage::SessionProvisioning,
+                logLine("xcloud transport progress: %s", detail.c_str());
+            };
+            callbacks.video = [video = job->video](const uint8_t* data, size_t size, uint32_t timestamp) {
+                (void)video->pushAccessUnit(data, size, timestamp);
+            };
+            callbacks.closed = [&state](const std::string& reason, bool recoverable) {
+                bool userRequested = false;
+                {
+                    std::lock_guard<std::mutex> lock(state.mutex);
+                    userRequested = state.stopSessionRequested;
+                    if (!userRequested && state.stage == LoginStage::Streaming) {
+                        state.streamTransportLost = true;
+                        state.sessionMessage = recoverable
+                            ? "Video paused: connection lost. The last frame is held on screen."
+                            : "Video transport ended. The last frame is held on screen.";
+                        ++state.generation;
+                    }
+                }
+                logLine("WebRTC stream closed recoverable=%d user_cancel=%d reason=%s; keeping app in stream UI",
+                        recoverable ? 1 : 0, userRequested ? 1 : 0, reason.c_str());
+            };
+            xc::stream::StreamOptions streamOptions;
+            streamOptions.baselineH264Only = true;
+            streamOptions.enableIceUdpMux = true;
+            streamOptions.resolutionAlias = streamProfile.tier;
+            streamOptions.maxBitrate = streamProfile.maxBitrate;
+            logLine("stream media config resolution=%sp remb_cap=%u decoder_max=1920x1088 adaptive=queue+decode+convert",
+                    streamProfile.tier.c_str(), streamProfile.maxBitrate);
+            xc::stream::StreamSession stream(*job->gssv, std::move(callbacks), std::move(streamOptions));
+            updateSession(state, LoginStage::SessionProvisioning,
+                          "Negotiating H.264 video with the cloud console...");
+            error.clear();
+            if (!stream.start(error)) {
+                logLine("WebRTC start failed: %s", error.c_str());
+                stream.close();
+                job->video->stop();
+                job->gssv->stopSession();
+                updateSession(state, LoginStage::Failed, {}, "Video transport failed: " + error);
+                wipe(job->refreshToken);
+                return nullptr;
+            }
+
+            updateSession(state, LoginStage::Streaming,
+            {
+                std::lock_guard<std::mutex> lock(state.mutex);
+                state.streamTransportLost = false;
+                state.streamTier = streamProfile.tier;
+                state.streamBitrateCap = streamProfile.maxBitrate;
+                state.streamSettingsOpen = false;
+            }
+            logLine("WebRTC connected; waiting for H.264 pictures and controller reports");
+            bool requestedStop = false;
+            uint64_t nextGamepadAt = sceKernelGetProcessTime() / 1000u;
+            uint64_t nextPerformanceCheckAt = nextGamepadAt;
+            uint64_t nextVideoFlowLogAt = nextGamepadAt;
+            uint64_t lastVideoDrops = 0;
+            xc::stream::GamepadFrame lastGamepad{};
+            bool firstGamepadReport = true;
+            bool previousTouchpad = false;
+            bool settingsOpen = false, settingsOpenLatched = false;
+            uint64_t optionsHeldSince = 0;
+            uint64_t nextSettingsRepeatAt = 0;
+            uint8_t settingsRow = 0;
+            std::string draftTier = streamProfile.tier;
+            uint32_t draftBitrate = streamProfile.maxBitrate;
+            uint64_t nextHudStatsAt = nextGamepadAt;
+            uint64_t decoderResetHeldSince = 0;
+            bool decoderResetLatched = false;
+            uint64_t xboxGuideUntil = 0;
+            bool transportLostNotified = false;
+            uint64_t lastPerformanceGeneration = 0;
+            uint64_t performanceWindows = 0;
+            uint32_t pressureWindows = 0;
+            StreamProfile profileToSave = streamProfile;
+            xc::ps4::VideoPerformanceSnapshot lastVideoPerformance{};
+            while (true) {
+                {
+                    std::lock_guard<std::mutex> lock(state.mutex);
+                    requestedStop = state.stopSessionRequested;
+                }
+                if (requestedStop) break;
+                const uint64_t now = sceKernelGetProcessTime() / 1000u;
+                const bool streamOpen = stream.isOpen();
+                    const bool options = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_START);
+                    const bool circle = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_EAST);
+                    const bool touchpad = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_TOUCHPAD);
+                    const bool resetChord = job->controller &&
+                        job->controller->button(SDL_GAMEPAD_BUTTON_LEFT_STICK) &&
+                        job->controller->button(SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+                    if (resetChord) {
+                        if (!decoderResetHeldSince) decoderResetHeldSince = now;
+                        if (!decoderResetLatched && now - decoderResetHeldSince >= 1000) {
+                            decoderResetLatched = true;
+                            logLine("decoder_reset request=user_master_button chord=L3+R3 hold_ms=1000");
+                        }
+                    } else {
+                        decoderResetHeldSince = 0;
+                        decoderResetLatched = false;
+                    }
+                    if (options) {
+                        if (!optionsHeldSince) optionsHeldSince = now;
+                        if (!settingsOpen && !settingsOpenLatched && now - optionsHeldSince >= 1000) {
+                            settingsOpen = true;
+                            settingsOpenLatched = true;
+                            settingsRow = 0;
+                            draftTier = streamProfile.tier;
+                            draftBitrate = streamProfile.maxBitrate;
+                            nextSettingsRepeatAt = 0;
+                            {
+                                std::lock_guard<std::mutex> lock(state.mutex);
+                                state.streamSettingsOpen = true;
+                                state.streamSettingsRow = settingsRow;
+                                state.streamDraftTier = draftTier;
+                                state.streamDraftBitrate = draftBitrate;
+                                ++state.generation;
+                            }
+                            logLine("stream_settings action=open hold_ms=1000 tier=%s bitrate_cap=%u controls=dpad_cross_circle",
+                                    tierLabel(streamProfile.tier), streamProfile.maxBitrate);
+                        }
+                    } else {
+                        optionsHeldSince = 0;
+                        settingsOpenLatched = false;
+                    }
+
+                    const bool wasSettingsOpen = settingsOpen;
+                    const bool cross = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_SOUTH);
+                    const bool dpadUp = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_DPAD_UP);
+                    const bool dpadDown = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+                    const bool dpadLeft = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+                    const bool dpadRight = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+                    if (settingsOpen) {
+                            settingsOpen = false;
+                            {
+                                std::lock_guard<std::mutex> lock(state.mutex);
+                                state.streamSettingsOpen = false;
+                                ++state.generation;
+                            }
+                            logLine("stream_settings action=cancel tier=%s bitrate_cap=%u",
+                                    tierLabel(streamProfile.tier), streamProfile.maxBitrate);
+                        } else if (cross && !previousCross) {
+                            streamProfile.tier = draftTier;
+                            streamProfile.maxBitrate = draftBitrate;
+                            stream.setMaximumBitrate(streamProfile.maxBitrate);
+                            profileToSave = streamProfile;
+                            pressureWindows = 0;
+                            {
+                                std::lock_guard<std::mutex> lock(state.mutex);
+                                state.streamTier = streamProfile.tier;
+                                state.streamBitrateCap = streamProfile.maxBitrate;
+                                state.streamSettingsOpen = false;
+                                ++state.generation;
+                            }
+                            settingsOpen = false;
+                            else if (settingsRow == 0) draftTier = draftTier == "720" ? "1080" : "720";
+                                size_t index = 0;
+                                while (index + 1 < kSelectableBitrates.size() &&
+                                       kSelectableBitrates[index] != draftBitrate) ++index;
+                                if (dpadLeft) index = (index + kSelectableBitrates.size() - 1) % kSelectableBitrates.size();
+                                else index = (index + 1) % kSelectableBitrates.size();
+                                draftBitrate = kSelectableBitrates[index];
+                            }
+                            nextSettingsRepeatAt = now + 220;
+                            std::lock_guard<std::mutex> lock(state.mutex);
+                            state.streamSettingsRow = settingsRow;
+                            state.streamDraftTier = draftTier;
+                            state.streamDraftBitrate = draftBitrate;
+                            ++state.generation;
+                        }
+                    }
+
+                    if (touchpad && !previousTouchpad) {
+                        xboxGuideUntil = now + 250;
+                    }
+                    previousTouchpad = touchpad;
+                    previousCircle = circle;
+                    previousCross = cross;
+                    xc::stream::GamepadFrame gamepad = job->controller
+                        ? readStreamGamepad(*job->controller) : xc::stream::GamepadFrame{};
+                    if (settingsOpen || wasSettingsOpen) gamepad = {};
+                    if (streamOpen) {
+                        const auto axisBucket = [](float value) { return static_cast<int>(value * 8.0f); };
+                        const bool axesChanged = axisBucket(gamepad.leftX) != axisBucket(lastGamepad.leftX) ||
+                                                 axisBucket(gamepad.leftY) != axisBucket(lastGamepad.leftY) ||
+                                                 axisBucket(gamepad.rightX) != axisBucket(lastGamepad.rightX) ||
+                                                 axisBucket(gamepad.rightY) != axisBucket(lastGamepad.rightY) ||
+                                                 axisBucket(gamepad.leftTrigger) != axisBucket(lastGamepad.leftTrigger) ||
+                                                 axisBucket(gamepad.rightTrigger) != axisBucket(lastGamepad.rightTrigger);
+                                    gamepad.buttons, gamepad.leftX, gamepad.leftY,
+                                    gamepad.rightX, gamepad.rightY,
+                                    gamepad.leftTrigger, gamepad.rightTrigger);
+                            firstGamepadReport = false;
+                        }
+                        lastGamepad = gamepad;
+                    }
+                    nextGamepadAt = now + 16;
+                }
+                if (!streamOpen) {
+                    if (!transportLostNotified) {
+                        {
+                            std::lock_guard<std::mutex> lock(state.mutex);
+                            if (!state.streamTransportLost) {
+                                state.streamTransportLost = true;
+                                ++state.generation;
+                            }
+                        }
+                        logLine("stream transport closed; holding stream UI and last frame until explicit user cancel");
+                        transportLostNotified = true;
+                    }
+                    sceKernelUsleep(50000);
+                    continue;
+                }
+                if (job->video->takeKeyframeRequest()) {
+                    logLine("video recovery action=request_keyframe reason=decoder_reset");
+                }
+                if (now >= nextPerformanceCheckAt) {
+                    nextPerformanceCheckAt = now + 250;
+                    const auto performance = job->video->performanceSnapshot();
+                    if (now >= nextVideoFlowLogAt) {
+                        nextVideoFlowLogAt = now + 2000;
+                            static_cast<unsigned long long>(performance.receivedAccessUnits),
+                            static_cast<unsigned long long>(performance.acceptedAccessUnits),
+                            static_cast<unsigned long long>(performance.dequeuedAccessUnits), performance.queuedAccessUnits,
+                            static_cast<unsigned long long>(performance.totalDecoded),
+                            static_cast<unsigned long long>(performance.totalPublished),
+                            static_cast<unsigned long long>(performance.failedAccessUnits),
+                            static_cast<unsigned long long>(performance.emptyOutputs),
+                            static_cast<unsigned long long>(performance.droppedAccessUnits),
+                            static_cast<unsigned long long>(performance.lastInputAgeMs),
+                            static_cast<unsigned long long>(performance.lastOutputAgeMs), performance.decoderCpu,
+                            performance.conversionCallerCpu, performance.converterCpus[0],
+                            performance.converterCpus[1], performance.converterCpus[2]);
+                            logLine("video recovery action=request_keyframe reason=decoder_input_queue_drop");
+                        }
+                    }
+
+                    if (now >= nextHudStatsAt) {
+                        nextHudStatsAt = now + 1000;
+                        const auto& network = stream.videoStats();
+                        {
+                            std::lock_guard<std::mutex> lock(state.mutex);
+                            state.streamBitrateCap = streamProfile.maxBitrate;
+                            state.streamReceiveRate = network.receiveRate.load();
+                            state.streamRttMs = rttMs;
+                            state.streamWidth = performance.width;
+                            state.streamHeight = performance.height;
+                            state.streamNewVideoFps = performance.decodedFps;
+                            state.streamPublishedFps = performance.publishedFps;
+                            state.streamQueueDepth = performance.queuedAccessUnits;
+                            state.streamQueuePeak = performance.maxQueueDepth;
+                            state.streamQueueWaitAvgUs = performance.queueWaitAvgUs;
+                            state.streamQueueWaitMaxUs = performance.queueWaitMaxUs;
+                            state.streamDecodeAvgUs = performance.decodeAvgUs;
+                            state.streamConvertAvgUs = performance.convertAvgUs;
+                            ++state.streamStatsGeneration;
+                        }
+                            tierLabel(streamProfile.tier), performance.width, performance.height,
+                            performance.decodedFps, performance.publishedFps,
+                            performance.queuedAccessUnits, performance.maxQueueDepth,
+                            performance.queueWaitAvgUs / 1000.0, performance.queueWaitMaxUs / 1000.0,
+                            performance.decodeAvgUs / 1000.0, performance.convertAvgUs / 1000.0,
+                            rttMs, network.receiveRate.load() / 1000000.0,
+                            static_cast<unsigned long long>(network.lost.load()),
+                            static_cast<unsigned long long>(network.recovered.load()));
+                    }
+
+                    if (performance.generation == lastPerformanceGeneration) {
+                        continue;
+                    }
+                    lastPerformanceGeneration = performance.generation;
+                    lastVideoPerformance = performance;
+                    ++performanceWindows;
+                    const uint32_t skipPermille = performance.decoded
+                        ? performance.skipped * 1000u / performance.decoded : 0;
+                    const uint64_t combinedUs = static_cast<uint64_t>(performance.decodeAvgUs) +
+                                                performance.convertAvgUs;
+                    const bool pressure = performance.maxQueueDepth >= 4 || skipPermille >= 200 ||
+                                          combinedUs >= 23000;
+                    const auto& network = stream.videoStats();
+                    logLine("stream_adapt window=%llu tier=%s queue_max=%u skipped=%u/%u window_ms=%u decode_fps=%u published_fps=%u decode_ms=%.2f convert_ms=%.2f cpu_decoder=%d cpu_convert=%d,%d,%d loss=%llu recovered=%llu remb=%u receive_bps=%u rtt_ms=%d",
+                            static_cast<unsigned long long>(performance.generation),
+                            streamProfile.tier.c_str(), performance.maxQueueDepth,
+                            performance.skipped, performance.decoded,
+                            performance.windowDurationMs, performance.decodedFps, performance.publishedFps,
+                            performance.decodeAvgUs / 1000.0, performance.convertAvgUs / 1000.0,
+                            performance.decoderCpu, performance.converterCpus[0],
+                            performance.converterCpus[1], performance.converterCpus[2],
+                            static_cast<unsigned long long>(network.lost.load()),
+                            static_cast<unsigned long long>(network.recovered.load()),
+
+                    pressureWindows = pressure ? pressureWindows + 1 : 0;
+                    if (pressure) {
+                        logLine("stream_adapt action=keep_user_resolution selected=%s pressure_window=%u queue_max=%u skipped=%u/%u decode_ms=%.2f convert_ms=%.2f actual=%ux%u",
+                                tierLabel(streamProfile.tier), pressureWindows,
+                                performance.maxQueueDepth, performance.skipped, performance.decoded,
+                                performance.decodeAvgUs / 1000.0, performance.convertAvgUs / 1000.0,
+                                performance.width, performance.height);
+                    }
+                    profileToSave.lastQueueMax = performance.maxQueueDepth;
+                    profileToSave.lastDecodeAvgUs = performance.decodeAvgUs;
+                    profileToSave.lastConvertAvgUs = performance.convertAvgUs;
+                    profileToSave.lastSkipPermille = skipPermille;
+                }
+                sceKernelUsleep(4000);
+            }
+            stream.close();
+            if (performanceWindows != 0) saveStreamProfile(profileToSave);
+            job->video->stop();
+            job->gssv->stopSession();
+            if (requestedStop) {
+                std::lock_guard<std::mutex> lock(state.mutex);
+                state.stage = LoginStage::Library;
+                state.sessionMessage.clear();
+                state.error.clear();
+                state.stopSessionRequested = false;
+                state.streamTransportLost = false;
+                state.streamSettingsOpen = false;
+                ++state.generation;
+                logLine("cloud stream stopped by user");
+            } else {
+                logLine("cloud stream ended");
+            }
+            wipe(job->refreshToken);
+            return nullptr;
+        }
+        sceKernelUsleep(1000000);
+    }
+    job->gssv->stopSession();
+    updateSession(state, LoginStage::Failed, {}, "Timed out while waiting for cloud session provisioning.");
+    logLine("session provisioning timed out");
+    wipe(job->refreshToken);
+    return nullptr;
+}
+
+void* signInWorker(void* opaque) {
+    auto& state = *static_cast<LoginState*>(opaque);
+    xc::auth::MsaConfig config;
+    xc::auth::MsaClient msa(std::move(config));
+    xc::auth::MsaTokens tokens;
+    xc::auth::DeviceCode deviceCode;
+    std::string error;
+
+    setStage(state, LoginStage::CheckingSaved);
+    std::string cachedRefreshToken;
+    int cacheError = 0;
+    if (readRefreshToken(cachedRefreshToken, cacheError)) {
+        logLine("saved Microsoft account found; refreshing session");
+        setStage(state, LoginStage::Refreshing);
+        bool networkError = false;
+        if (msa.refresh(cachedRefreshToken, tokens, error, {}, &networkError)) {
+            logLine("saved Microsoft session refreshed");
+            if (!saveRefreshToken(tokens.refreshToken, cacheError))
+                logLine("warning: refreshed account cache could not be updated errno=%d", cacheError);
+            wipe(cachedRefreshToken);
+            finishXboxLogin(state, tokens);
+            return nullptr;
+        }
+        wipe(cachedRefreshToken);
+        if (networkError) {
+            logLine("saved Microsoft session refresh failed due to network/service error");
+            setStage(state, LoginStage::Failed,
+                     "Could not reach Microsoft to refresh the saved account. Check the connection and retry.");
+            return nullptr;
+        }
+        logLine("saved Microsoft session was rejected; requesting sign-in again");
+        clearRefreshTokenCache();
+        error.clear();
+    } else {
+        if (cacheError != ENOENT)
+            logLine("saved account cache could not be read errno=%d", cacheError);
+        else
+            logLine("no saved Microsoft account; requesting device code");
+    }
+
+    setStage(state, LoginStage::Starting);
+    if (!msa.startDeviceCode(deviceCode, error)) {
+        logLine("msa device-code request failed: %s", error.c_str());
+        setStage(state, LoginStage::Failed, error);
+        return nullptr;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.verificationUri = deviceCode.verificationUri;
+        state.verificationUriComplete = deviceCode.verificationUriComplete;
+        state.userCode = deviceCode.userCode;
+        state.expiresInSec = deviceCode.expiresInSec;
+        state.stage = LoginStage::ShowingCode;
+        ++state.generation;
+    }
+    // The user code and device code are credentials: show the user code on TV,
+    // but never write either value to klog or stdout.
+    logLine("msa device code issued; expires_sec=%d codes=redacted qr=%s",
+            deviceCode.expiresInSec,
+            deviceCode.verificationUriComplete.empty() ? "unavailable" : "ready");
+
+    int interval = std::max(1, deviceCode.intervalSec);
+    const uint64_t deadlineUs = sceKernelGetProcessTime() +
+        static_cast<uint64_t>(std::max(1, deviceCode.expiresInSec)) * 1000000ull;
+    while (sceKernelGetProcessTime() < deadlineUs) {
+        sceKernelUsleep(static_cast<uint64_t>(interval) * 1000000ull);
+        error.clear();
+        switch (msa.pollDeviceCode(deviceCode, tokens, error)) {
+            case xc::auth::PollResult::Success:
+                wipe(deviceCode.deviceCode);
+                logLine("msa authorization complete; continuing with xbox live and xcloud");
+                if (!tokens.refreshToken.empty()) {
+                    if (saveRefreshToken(tokens.refreshToken, cacheError))
+                        logLine("Microsoft account refresh token saved in app data");
+                    else
+                        logLine("warning: could not save Microsoft account refresh token errno=%d", cacheError);
+                } else {
+                    logLine("warning: Microsoft did not return a refresh token; next launch may request sign-in");
+                }
+                finishXboxLogin(state, tokens);
+                return nullptr;
+            case xc::auth::PollResult::Pending:
+                break;
+            case xc::auth::PollResult::SlowDown:
+                interval += 5;
+                logLine("msa requested slower polling; interval_sec=%d", interval);
+                break;
+            case xc::auth::PollResult::Expired:
+                wipe(deviceCode.deviceCode);
+                setStage(state, LoginStage::Expired, "The sign-in code expired. Restart the app to try again.");
+                logLine("msa device code expired");
+                return nullptr;
+            case xc::auth::PollResult::Denied:
+                wipe(deviceCode.deviceCode);
+                setStage(state, LoginStage::Denied, "Sign-in was declined on the other device.");
+                logLine("msa authorization denied");
+                return nullptr;
+            case xc::auth::PollResult::Error:
+                wipe(deviceCode.deviceCode);
+                setStage(state, LoginStage::Failed, error);
+                logLine("msa authorization failed: %s", error.c_str());
+                return nullptr;
+        }
+    }
+    wipe(deviceCode.deviceCode);
+    setStage(state, LoginStage::Expired, "The sign-in code expired. Restart the app to try again.");
+    logLine("msa device-code deadline reached");
+    return nullptr;
+}
+
+struct DrawContext {
+    xc::ui::Canvas* canvas;
+    xc::ui::Fonts* fonts;
+    LoginState* state;
+    Controller* controller;
+    xc::ui::AppUi* ps5Ui = nullptr;
+    xc::ps4::VideoDecoder* video = nullptr;
+    LoginStage previousStage = LoginStage::Starting;
+    uint32_t previousButtons = 0;
+    bool previousL2 = false;
+    bool previousR2 = false;
+    uint64_t lastGeneration = 0;
+    uint64_t lastHudPerformanceGeneration = UINT64_MAX;
+    uint64_t lastPresentationGeneration = UINT64_MAX;
+    uint64_t lastStreamStatsGeneration = UINT64_MAX;
+    bool lastHudTransportLost = false;
+    std::chrono::steady_clock::time_point canvasCopyWindowStartedAt{};
+    uint64_t canvasCopySumUs = 0;
+    uint32_t canvasCopySamples = 0;
+    uint32_t canvasCopyMaxUs = 0;
+    uint32_t canvasCopyAvgUs = 0;
+    size_t ps5UiTitleCount = 0;
+    uint64_t ps5UiLibraryRevision = 0;
+    struct Repeater {
+        bool update(bool held, uint64_t now) {
+            if (!held) { next = 0; return false; }
+            if (!next) { next = now + 350; return true; }
+            if (now >= next) { next = now + 110; return true; }
+            return false;
+        }
+        uint64_t next = 0;
+    } up, down, left, right, dpadLeft, dpadRight;
+    bool ps5UiReady = false;
+    bool ps5UiLoading = false;
+};
+
+xc::stream::GamepadFrame readStreamGamepad(const Controller& controller) {
+    using B = SDL_GamepadButton;
+    using A = SDL_GamepadAxis;
+    xc::stream::GamepadFrame frame;
+    auto set = [&](bool down, uint16_t bit) {
+        if (down) frame.buttons |= bit;
+    };
+    set(controller.button(B::SDL_GAMEPAD_BUTTON_SOUTH), xc::stream::kA);
+    set(controller.button(B::SDL_GAMEPAD_BUTTON_EAST), xc::stream::kB);
+    set(controller.button(B::SDL_GAMEPAD_BUTTON_WEST), xc::stream::kX);
+    set(controller.button(B::SDL_GAMEPAD_BUTTON_NORTH), xc::stream::kY);
+    set(controller.button(B::SDL_GAMEPAD_BUTTON_DPAD_UP), xc::stream::kDPadUp);
+    set(controller.button(B::SDL_GAMEPAD_BUTTON_DPAD_DOWN), xc::stream::kDPadDown);
+    set(controller.button(B::SDL_GAMEPAD_BUTTON_DPAD_LEFT), xc::stream::kDPadLeft);
+    set(controller.button(B::SDL_GAMEPAD_BUTTON_DPAD_RIGHT), xc::stream::kDPadRight);
+    set(controller.button(B::SDL_GAMEPAD_BUTTON_LEFT_SHOULDER), xc::stream::kLeftShoulder);
+    set(controller.button(B::SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER), xc::stream::kRightShoulder);
+    set(controller.button(B::SDL_GAMEPAD_BUTTON_LEFT_STICK), xc::stream::kLeftThumb);
+    set(controller.button(B::SDL_GAMEPAD_BUTTON_RIGHT_STICK), xc::stream::kRightThumb);
+    set(controller.button(B::SDL_GAMEPAD_BUTTON_START), xc::stream::kMenu);
+    // The PS4 touchpad click is reserved for a short Xbox Guide/Nexus pulse.
+    // Mapping it to View made Guide inaccessible when the chord was sampled
+    // between slow UI refreshes.
+    frame.leftX = controller.axis(A::SDL_GAMEPAD_AXIS_LEFTX);
+    frame.leftY = -controller.axis(A::SDL_GAMEPAD_AXIS_LEFTY);
+    frame.rightX = controller.axis(A::SDL_GAMEPAD_AXIS_RIGHTX);
+    frame.rightY = -controller.axis(A::SDL_GAMEPAD_AXIS_RIGHTY);
+    frame.leftTrigger = controller.axis(A::SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
+    frame.rightTrigger = controller.axis(A::SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+    return frame;
+}
+
+xc::ui::NavInput readNavInput(DrawContext& context, uint64_t now) {
+    using B = SDL_GamepadButton;
+    constexpr uint32_t kCross = 1u << 0, kCircle = 1u << 1, kSquare = 1u << 2;
+    constexpr uint32_t kTriangle = 1u << 3, kStart = 1u << 4, kL1 = 1u << 5;
+    constexpr uint32_t kR1 = 1u << 6, kR3 = 1u << 7, kTouchpad = 1u << 8;
+    uint32_t current = 0;
+    auto held = [&](B button, uint32_t bit) {
+        const bool down = context.controller->button(button);
+        if (down) current |= bit;
+        return down;
+    };
+    const bool cross = held(B::SDL_GAMEPAD_BUTTON_SOUTH, kCross);
+    const bool circle = held(B::SDL_GAMEPAD_BUTTON_EAST, kCircle);
+    const bool square = held(B::SDL_GAMEPAD_BUTTON_WEST, kSquare);
+    const bool triangle = held(B::SDL_GAMEPAD_BUTTON_NORTH, kTriangle);
+    const bool start = held(B::SDL_GAMEPAD_BUTTON_START, kStart);
+    const bool l1 = held(B::SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, kL1);
+    const bool r1 = held(B::SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, kR1);
+    const bool r3 = held(B::SDL_GAMEPAD_BUTTON_RIGHT_STICK, kR3);
+    const bool touchpad = held(B::SDL_GAMEPAD_BUTTON_TOUCHPAD, kTouchpad);
+    auto pressed = [&](bool down, uint32_t bit) { return down && !(context.previousButtons & bit); };
+
+    xc::ui::NavInput nav;
+    nav.nowMs = now;
+    const bool dpadUp = context.controller->button(B::SDL_GAMEPAD_BUTTON_DPAD_UP);
+    const bool dpadDown = context.controller->button(B::SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    const bool dpadLeft = context.controller->button(B::SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+    const bool dpadRight = context.controller->button(B::SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    nav.up = context.up.update(dpadUp || context.controller->axis(SDL_GAMEPAD_AXIS_LEFTY) < -0.6f, now);
+    nav.down = context.down.update(dpadDown || context.controller->axis(SDL_GAMEPAD_AXIS_LEFTY) > 0.6f, now);
+    nav.left = context.left.update(dpadLeft || context.controller->axis(SDL_GAMEPAD_AXIS_LEFTX) < -0.6f, now);
+    nav.right = context.right.update(dpadRight || context.controller->axis(SDL_GAMEPAD_AXIS_LEFTX) > 0.6f, now);
+    nav.accept = pressed(cross, kCross);
+    nav.back = pressed(circle, kCircle);
+    nav.options = pressed(start, kStart);
+    nav.square = pressed(square, kSquare);
+    nav.triangle = pressed(triangle, kTriangle);
+    nav.l1 = pressed(l1, kL1);
+    nav.r1 = pressed(r1, kR1);
+    nav.r3 = pressed(r3, kR3);
+    nav.touchpad = touchpad;
+    const float l2 = context.controller->axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
+    const float r2 = context.controller->axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+    nav.l2 = l2 > 0.5f && !context.previousL2;
+    nav.r2 = r2 > 0.5f && !context.previousR2;
+    nav.l2Analog = l2;
+    nav.r2Analog = r2;
+    context.previousL2 = l2 > 0.5f;
+    context.previousR2 = r2 > 0.5f;
+    nav.stickX = context.controller->axis(SDL_GAMEPAD_AXIS_LEFTX);
+    nav.stickY = context.controller->axis(SDL_GAMEPAD_AXIS_LEFTY);
+    nav.dpadLeft = context.dpadLeft.update(dpadLeft, now);
+    nav.dpadRight = context.dpadRight.update(dpadRight, now);
+    context.previousButtons = current;
+    return nav;
+}
+
+    std::vector<xc::ui::GameTile> tiles;
+    for (const auto& title : titles) {
+        xc::ui::GameTile tile;
+        tile.productId = title.productId.empty() ? title.titleId : title.productId;
+        tile.titleId = title.titleId;
+        tile.name = title.name.empty() ? title.titleId : title.name;
+        tile.tileUrl = title.imageUrl;
+        tile.heroUrl = title.imageUrl;
+        tile.playable = true;
+        tile.freeInStore = title.isFreeInStore;
+        tiles.push_back(std::move(tile));
+    }
+    return tiles;
+}
+
+void loadPs5LibraryUi(xc::ui::AppUi& appUi, const LoginSnapshot& state) {
+    appUi.setPrefs({}, xc::ui::LibrarySort::Recent);
+    appUi.setLoading(state.libraryLoading, state.libraryLoaded, 0);
+    appUi.setProfile(state.gamertag, {});
+    appUi.showTab(xc::ui::Tab::Library);
+}
+
+void updatePs5LibraryUi(xc::ui::AppUi& appUi, const LoginSnapshot& state) {
+    appUi.setLoading(state.libraryLoading, state.libraryLoaded, 0);
+}
+
+char titleInitial(const xc::xcloud::Title& title) {
+    const std::string& name = title.name.empty() ? title.titleId : title.name;
+    for (unsigned char ch : name) {
+        if (std::isalnum(ch)) return static_cast<char>(std::toupper(ch));
+    }
+    return '#';
+}
+
+size_t jumpToAdjacentInitial(const std::vector<xc::xcloud::Title>& titles, size_t current, int direction) {
+    if (titles.empty()) return 0;
+    const char initial = titleInitial(titles[current]);
+    for (size_t step = 1; step < titles.size(); ++step) {
+        const size_t candidate = direction > 0
+            ? (current + step) % titles.size()
+            : (current + titles.size() - (step % titles.size())) % titles.size();
+        if (titleInitial(titles[candidate]) != initial) return candidate;
+    }
+    return current;
+}
+
+    using namespace xc::ui;
+    static const std::vector<xc::xcloud::Title> kNoTitles;
+    const bool inLibrary = s.stage == LoginStage::Library || s.stage == LoginStage::SessionStarting ||
+                           s.stage == LoginStage::SessionProvisioning || s.stage == LoginStage::SessionReady;
+    fonts.semibold.draw(canvas, inLibrary ? "Choose a cloud game" : "Sign in with your Microsoft account",
+                        150, 415, 34, rgba(238, 238, 238));
+
+    switch (s.stage) {
+        case LoginStage::Starting:
+            fonts.regular.draw(canvas, "Requesting a secure sign-in code...", 150, 510, 27, rgba(190, 210, 190));
+            break;
+        case LoginStage::CheckingSaved:
+            fonts.regular.draw(canvas, "Checking for a saved Microsoft account...", 150, 510, 27,
+                               rgba(190, 210, 190));
+            break;
+        case LoginStage::Refreshing:
+            fonts.regular.draw(canvas, "Refreshing your saved Microsoft sign-in...", 150, 510, 27,
+                               rgba(190, 210, 190));
+            break;
+        case LoginStage::ShowingCode:
+            fonts.regular.draw(canvas, "On your phone or computer, open:", 150, 500, 26, rgba(205, 215, 205));
+            fonts.semibold.draw(canvas, s.verificationUri.c_str(), 150, 550, 34, rgba(140, 235, 145));
+            fonts.regular.draw(canvas, "Enter this code:", 150, 640, 25, rgba(205, 215, 205));
+            fonts.bold.draw(canvas, s.userCode.c_str(), 150, 690, 66, rgba(255, 255, 255));
+            fonts.regular.draw(canvas, "Waiting for approval. Keep this screen open.", 150, 785, 24, rgba(190, 200, 190));
+            if (!s.verificationUriComplete.empty()) {
+                constexpr int maxVersion = 10;
+                constexpr int quietZone = 4;
+                uint8_t qr[qrcodegen_BUFFER_LEN_FOR_VERSION(maxVersion)]{};
+                uint8_t scratch[qrcodegen_BUFFER_LEN_FOR_VERSION(maxVersion)]{};
+                if (qrcodegen_encodeText(s.verificationUriComplete.c_str(), scratch, qr,
+                                         qrcodegen_Ecc_MEDIUM, qrcodegen_VERSION_MIN,
+                                         maxVersion, qrcodegen_Mask_AUTO, true)) {
+                    const int qrSize = qrcodegen_getSize(qr);
+                    const int modules = qrSize + quietZone * 2;
+                    const int scale = 7; // integer scale keeps modules camera-readable at 1080p
+                    const int side = modules * scale;
+                    const int x0 = 1425;
+                    const int y0 = 385;
+                    canvas.fillRect({x0, y0, side, side}, rgba(255, 255, 255));
+                    for (int y = 0; y < qrSize; ++y) {
+                        int run = 0;
+                        for (int x = 0; x <= qrSize; ++x) {
+                            if (x < qrSize && qrcodegen_getModule(qr, x, y)) {
+                                ++run;
+                                continue;
+                            }
+                            if (run) {
+                                canvas.fillRect({x0 + (quietZone + x - run) * scale,
+                                                 y0 + (quietZone + y) * scale,
+                                                 run * scale, scale}, rgba(8, 12, 9));
+                                run = 0;
+                            }
+                        }
+                    }
+                    fonts.regular.draw(canvas, "Scan with your phone", x0, y0 + side + 22,
+                                       23, rgba(210, 220, 210));
+                }
+            }
+            break;
+        case LoginStage::XboxLive:
+                               rgba(205, 215, 205));
+            break;
+        case LoginStage::Xcloud:
+                                rgba(140, 235, 145));
+            fonts.regular.draw(canvas, "Checking xCloud access and available region.", 150, 590, 25,
+                               rgba(205, 215, 205));
+            break;
+        case LoginStage::Library: {
+            const std::string details = "Account library  |  " + s.market + "  |  " + s.region +
+                "  |  " + std::to_string(titles.size()) + (s.libraryLoading ? "+ games (loading)" : " games");
+            fonts.regular.draw(canvas, details.c_str(), 150, 470, 21, rgba(190, 205, 190));
+            canvas.fillRect({145, 515, 850, 365}, rgba(12, 20, 14, 225), 16);
+            canvas.strokeRect({145, 515, 850, 365}, rgba(71, 118, 73, 255), 2, 16);
+            if (titles.empty()) {
+                                    180, 555, 26, rgba(235, 225, 210));
+            } else {
+                constexpr size_t visibleRows = 6;
+                const size_t first = s.selectedTitle >= visibleRows ? s.selectedTitle - visibleRows + 1 : 0;
+                const size_t last = std::min(titles.size(), first + visibleRows);
+                for (size_t i = first; i < last; ++i) {
+                    const int y = 535 + static_cast<int>(i - first) * 59;
+                    if (i == s.selectedTitle)
+                        canvas.fillRect({160, y, 820, 52}, rgba(30, 89, 37, 245), 9);
+                    const auto& title = titles[i];
+                    const std::string name = title.name.empty() ? title.titleId : title.name;
+                    fonts.semibold.draw(canvas, name.c_str(), 180, y + 8, 23,
+                                        i == s.selectedTitle ? rgba(255, 255, 255) : rgba(215, 225, 215));
+                }
+                const auto& selected = titles[std::min(s.selectedTitle, titles.size() - 1)];
+                const std::string name = selected.name.empty() ? selected.titleId : selected.name;
+                const std::string letter = std::string("Letter: ") + titleInitial(selected) +
+                    "    " + std::to_string(s.selectedTitle + 1) + "/" + std::to_string(titles.size());
+                fonts.semibold.draw(canvas, letter.c_str(), 1060, 500, 23, rgba(145, 225, 150));
+                fonts.bold.draw(canvas, name.c_str(), 1060, 545, 34, rgba(245, 255, 245));
+                fonts.regular.draw(canvas, selected.hasEntitlement ? "Available on this account" :
+                                   (selected.viaSubscription ? "Game Pass title" : "Account/store title"),
+                                   1060, 605, 23, rgba(145, 225, 150));
+                fonts.regular.draw(canvas, "Press X to request a cloud session.", 1060, 675, 22,
+                                   rgba(205, 215, 205));
+            }
+            break;
+        }
+        case LoginStage::SessionStarting:
+        case LoginStage::SessionProvisioning:
+        case LoginStage::SessionReady: {
+            if (!titles.empty()) {
+                const auto& selected = titles[std::min(s.selectedTitle, titles.size() - 1)];
+                const std::string name = selected.name.empty() ? selected.titleId : selected.name;
+                fonts.regular.draw(canvas, name.c_str(), 150, 590, 27, rgba(235, 240, 235));
+            }
+            fonts.regular.draw(canvas, s.sessionMessage.c_str(), 150, 650, 23, rgba(205, 215, 205));
+            if (s.stage == LoginStage::SessionProvisioning)
+                fonts.regular.draw(canvas, "Detailed transport steps are also recorded in the PS4 klog.",
+                                   150, 710, 21, rgba(165, 190, 165));
+            if (s.stage == LoginStage::SessionReady)
+                fonts.regular.draw(canvas, "Press Circle to return to the library.", 150, 715, 22,
+                                   rgba(190, 200, 190));
+            break;
+        }
+        case LoginStage::Streaming:
+                                150, 535, 34, s.streamTransportLost ? rgba(255, 205, 116) : rgba(140, 235, 145));
+            fonts.regular.draw(canvas, s.sessionMessage.c_str(), 150, 590, 23, rgba(205, 215, 205));
+            fonts.regular.draw(canvas, s.streamTransportLost
+                                   ? "The last decoded picture stays visible until you cancel."
+                                   : "Waiting for the first H.264 picture...",
+                               150, 650, 22,
+                               rgba(190, 200, 190));
+            break;
+        case LoginStage::Expired:
+        case LoginStage::Denied:
+        case LoginStage::Failed:
+            fonts.semibold.draw(canvas, s.generation && !titles.empty() ? "Cloud session did not complete" :
+                                "Sign-in did not complete", 150, 535, 34, rgba(255, 190, 120));
+            fonts.regular.draw(canvas, s.error.c_str(), 150, 590, 23, rgba(230, 220, 205));
+            break;
+    }
+
+    canvas.fillRect({150, 900, 760, 72}, rgba(24, 32, 25, 230), 14);
+    canvas.strokeRect({150, 900, 760, 72}, rgba(71, 118, 73, 255), 2, 14);
+    const char* footer = s.stage == LoginStage::Library ? "Up/Down: browse    L1/R1: previous/next letter    X: request session" :
+                         s.stage == LoginStage::SessionReady ? "Circle: return to library" :
+                         s.stage == LoginStage::Failed && !titles.empty() ? "Circle: return to library" :
+                         s.stage == LoginStage::SessionProvisioning || s.stage == LoginStage::SessionStarting
+                             ? "Keep the app open while the cloud session is prepared" :
+    fonts.regular.draw(canvas, footer, 180, 923, 21,
+                       rgba(190, 205, 190));
+}
+
+}
+
+bool beginCloudSession(LoginState& state, const xc::ui::GameTile& game,
+                      xc::ps4::VideoDecoder* video, Controller* controller) {
+    if (state.stage != LoginStage::Library || !state.gssv || state.refreshToken.empty() || game.titleId.empty())
+        return false;
+    auto* job = new SessionJob{&state, state.gssv, game.titleId, state.refreshToken, game.name, video, controller};
+    state.stage = LoginStage::SessionStarting;
+    state.stopSessionRequested = false;
+    state.sessionMessage = "Contacting the cloud session service...";
+    state.error.clear();
+            state.selectedTitle = i;
+            break;
+        }
+    }
+    ++state.generation;
+    pthread_t worker{};
+    const int rc = pthread_create(&worker, nullptr, sessionWorker, job);
+    if (rc == 0) {
+        pthread_detach(worker);
+        logLine("cloud session worker started title=%s", game.titleId.c_str());
+        return true;
+    }
+    delete job;
+    state.stage = LoginStage::Library;
+    state.error = "Could not start the cloud session worker.";
+    ++state.generation;
+    logLine("cloud session worker failed pthread_create=%d", rc);
+    return false;
+}
+
+xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
+    auto& context = *static_cast<DrawContext*>(opaque);
+    const uint64_t now = sceKernelGetProcessTime() / 1000u;
+    if (state.stage != LoginStage::Streaming) {
+        context.controller->pump();
+    }
+    const auto nav = state.stage == LoginStage::Streaming
+        ? xc::ui::NavInput{} : readNavInput(context, now);
+
+        context.ps5Ui->showHome();
+        context.ps5Ui->showTab(xc::ui::Tab::Library);
+        context.ps5Ui->invalidate();
+        context.ps5UiReady = false;
+    }
+    context.previousStage = state.stage;
+
+    if (state.stage == LoginStage::Streaming) {
+        const auto copyStart = std::chrono::steady_clock::now();
+        const uint32_t copyUs = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - copyStart).count());
+        const auto nowSteady = std::chrono::steady_clock::now();
+        if (context.canvasCopyWindowStartedAt.time_since_epoch().count() == 0)
+            context.canvasCopyWindowStartedAt = nowSteady;
+        if (newFrame) {
+            context.canvasCopySumUs += copyUs;
+            ++context.canvasCopySamples;
+            context.canvasCopyMaxUs = std::max(context.canvasCopyMaxUs, copyUs);
+        }
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                nowSteady - context.canvasCopyWindowStartedAt).count() >= 2000) {
+            if (context.canvasCopySamples) {
+                context.canvasCopyAvgUs = static_cast<uint32_t>(context.canvasCopySumUs / context.canvasCopySamples);
+                logLine("canvas_copy_timing window_ms=2000 new_frames=%u avg_ms=%.3f max_ms=%.3f",
+                        context.canvasCopySamples, context.canvasCopyAvgUs / 1000.0,
+                        context.canvasCopyMaxUs / 1000.0);
+            }
+            context.canvasCopyWindowStartedAt = nowSteady;
+            context.canvasCopySumUs = 0;
+            context.canvasCopySamples = 0;
+            context.canvasCopyMaxUs = 0;
+        }
+        if (context.video && context.video->hasFrame()) {
+            const auto performance = context.video->performanceSnapshot();
+                                    state.generation != context.lastGeneration ||
+            char title[128];
+            std::snprintf(title, sizeof(title), "%s  |  requested %s  |  %s",
+                tierLabel(state.streamTier),
+                performance.width ? "VIDEO ACTIVE" : "VIDEO STARTING");
+            char stats[192];
+            char detail[192];
+            char rtt[32];
+            if (state.streamRttMs >= 0) std::snprintf(rtt, sizeof(rtt), "%d ms", state.streamRttMs);
+            else std::snprintf(rtt, sizeof(rtt), "unknown");
+                state.streamReceiveRate / 1000000.0, state.streamRembEstimate / 1000000.0,
+            char pipeline[224];
+            std::snprintf(pipeline, sizeof(pipeline), "Queue %u / peak %u   Queue wait %.2f / %.2f ms   Decode %.2f ms   Convert %.2f ms",
+                state.streamQueueDepth, state.streamQueuePeak,
+                state.streamQueueWaitAvgUs / 1000.0, state.streamQueueWaitMaxUs / 1000.0,
+                state.streamDecodeAvgUs / 1000.0, state.streamConvertAvgUs / 1000.0);
+            char presentationLine[224];
+            std::snprintf(presentationLine, sizeof(presentationLine),
+                "Canvas copy %.2f ms   Update %.2f   Upload %.2f   Acquire %.2f   Encode+submit %.2f ms",
+                context.canvasCopyAvgUs / 1000.0, presentation.updateAvgUs / 1000.0,
+                presentation.uploadAvgUs / 1000.0, presentation.acquireAvgUs / 1000.0,
+                presentation.encodeSubmitAvgUs / 1000.0);
+            char waitLine[192];
+                presentation.frameIntervalAvgUs / 1000.0, presentation.frameIntervalMaxUs / 1000.0);
+            char cpu[192];
+            const char* controls = state.streamTransportLost
+            context.lastHudPerformanceGeneration = performance.generation;
+            context.lastPresentationGeneration = presentation.generation;
+            context.lastStreamStatsGeneration = state.streamStatsGeneration;
+            context.lastHudTransportLost = state.streamTransportLost;
+            context.lastGeneration = state.generation;
+        }
+            context.lastGeneration = state.generation;
+        }
+    }
+
+    if (state.stage == LoginStage::Library && context.ps5Ui) {
+        if (!context.ps5UiReady) {
+            loadPs5LibraryUi(*context.ps5Ui, state);
+            context.ps5UiReady = true;
+            context.ps5UiLoading = state.libraryLoading;
+        } else {
+            if (titleCount != context.ps5UiTitleCount ||
+                updatePs5LibraryUi(*context.ps5Ui, state);
+                context.ps5UiTitleCount = titleCount;
+                context.ps5UiLoading = state.libraryLoading;
+                        state.libraryLoading ? 1 : 0);
+            } else if (context.ps5UiLoading != state.libraryLoading) {
+                context.ps5Ui->setLoading(state.libraryLoading, state.libraryLoaded, 0);
+                context.ps5UiLoading = state.libraryLoading;
+            }
+        }
+        const auto event = context.ps5Ui->handle(nav);
+        if (event.action == xc::ui::Action::Play) {
+            beginCloudSession(*context.state, event.game, context.video, context.controller);
+        }
+        if (context.ps5Ui->needsRedraw(now)) {
+            context.ps5Ui->render(*context.canvas, now);
+            context.lastGeneration = state.generation;
+            return {true, false};
+        }
+        return {false, false};
+    }
+
+    if (state.stage == LoginStage::SessionReady ||
+        if (nav.back) {
+            std::lock_guard<std::mutex> lock(context.state->mutex);
+            if (context.state->stage == LoginStage::SessionReady ||
+                context.state->stage = LoginStage::Library;
+                context.state->error.clear();
+                context.state->sessionMessage.clear();
+                ++context.state->generation;
+            }
+            if (context.ps5Ui) {
+                context.ps5Ui->showHome();
+                context.ps5Ui->showTab(xc::ui::Tab::Library);
+            }
+            return {true, false};
+        }
+    }
+
+    if (state.generation == context.lastGeneration) return {};
+    context.lastGeneration = state.generation;
+    logLine("login canvas state changed stage=%d qr=%s manual_code=visible",
+            static_cast<int>(state.stage),
+            state.verificationUriComplete.empty() ? "unavailable" : "ready");
+    return {true, false};
+}
+}
+
+int main() {
+    struct stat logDirectoryStat{};
+    if (::stat(kLogDirectory, &logDirectoryStat) != 0 && ::mkdir(kLogDirectory, 0777) != 0 && errno != EEXIST) {
+        char message[160];
+        std::snprintf(message, sizeof(message), "cannot create log directory %s errno=%d\n", kLogDirectory, errno);
+        sceKernelDebugOutText(0, message);
+    }
+    if (::stat(kLogDirectory, &logDirectoryStat) == 0 && S_ISDIR(logDirectoryStat.st_mode)) {
+        xc::log::setFile(kAppLogPath);
+    } else {
+        sceKernelDebugOutText(0, "log directory /data/PSBOX is unavailable\n");
+    }
+    logLine("log_file=%s", kAppLogPath);
+    xc::ps4::setVideoDiagnosticSink([](const char* message) {
+        logLine("[XCLOUD-PS4-VIDEO] %s", message);
+    });
+
+    if (setenv("ORBIS_SUBMIT_DONE", "1", 1) != 0)
+        logLine("diagnostic setup failed: setenv ORBIS_SUBMIT_DONE");
+    else
+        logLine("diagnostic mode: ORBIS_SUBMIT_DONE=1 before Vulkan initialization");
+    logLine("startup begin; mode=msa-cache+xbl+xcloud+account-library+webrtc+h264; offering=xgpuweb");
+
+    const auto network = xc::ps4::initializeNetworkAndCheckInternet();
+    logLine("network stack=%s ip=%s internet=%s http_status=%d failed_step=%s error=0x%08x",
+            network.stackReady ? "ready" : "failed", network.ipAddress,
+            network.internetReachable ? "reachable" : "not-confirmed", network.httpStatus,
+            network.failedStep, static_cast<unsigned>(network.errorCode));
+
+    xc::ui::Fonts fonts;
+    if (!fonts.load("/app0/assets/fonts")) {
+        logLine("font load failed; refusing to pretend the UI is ready");
+        for (;;) sceKernelUsleep(1000000);
+    }
+
+    LoginState state;
+    xc::ps4::VideoDecoder videoDecoder;
+    Controller controller;
+    const bool controllerReady = controller.initialize();
+    if (!controllerReady) logLine("controller navigation unavailable; sign-in and network UI remain active");
+    pthread_t worker{};
+    const int threadRc = pthread_create(&worker, nullptr, signInWorker, &state);
+    if (threadRc != 0) {
+        logLine("could not start MSA worker; pthread_create=%d", threadRc);
+        setStage(state, LoginStage::Failed, "Could not start the sign-in network worker.");
+    } else {
+        logLine("MSA sign-in worker started");
+    }
+
+    if (mkdir("/data/XCHM00001", 0700) != 0 && errno != EEXIST)
+        logLine("image cache directory setup failed errno=%d", errno);
+    xc::ui::Canvas canvas(1920, 1080);
+    xc::ui::AppUi* appUiPtr = nullptr;
+    xc::ui::ImageCache images([&] { if (appUiPtr) appUiPtr->invalidate(); },
+    xc::ui::AppUi appUi(fonts, images);
+    appUiPtr = &appUi;
+    DrawContext draw{&canvas, &fonts, &state, &controller, &appUi, &videoDecoder};
+    drawLoginScreen(canvas, fonts, initialState);
+    draw.lastGeneration = initialState.generation;
+    logLine("canvas ready 1920x1080 RGBA; entering Mesa Orbis WSI/VideoOut");
+}
