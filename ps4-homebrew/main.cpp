@@ -1192,6 +1192,7 @@ void* sessionWorker(void* opaque) {
                             settingsOpen = false;
                             inputMuted.store(false, std::memory_order_release);
                                     tierLabel(streamProfile.tier), streamProfile.maxBitrate,
+                                    streamProfile.automaticVideoReset ? 1u : 0u,
                             else if (settingsRow == 2) draftFps = draftFps == 60 ? 30 : 60;
                             else if (settingsRow == 3) draftAutoReset = !draftAutoReset;
                             else if (settingsRow == 5) draftFrameWait = draftFrameWait ? 0 : 1;
@@ -2113,6 +2114,7 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
             std::snprintf(cpu, sizeof(cpu), "Session worker: %s age %llu ms | decoder CPU %d | input warning above 1000 ms",
                 step < 8 ? stepNames[step] : "unknown", static_cast<unsigned long long>(stepAge), performance.decoderCpu);
             const char* controls = state.streamTransportLost
+            }
             context.lastHudPerformanceGeneration = performance.generation;
             context.lastPresentationGeneration = presentation.generation;
             context.lastStreamStatsGeneration = state.streamStatsGeneration;
