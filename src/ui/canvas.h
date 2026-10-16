@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <vector>
+#include <unordered_map>
 
 namespace xc::ui {
 
@@ -28,6 +29,14 @@ struct Rect {
     int x = 0, y = 0, w = 0, h = 0;
 };
 
+// Streaming HUD draw list: masks are cached in an atlas; blending and rounded
+// panels are executed by Vulkan. Other screens keep the software canvas.
+struct GpuUiCommand {
+    Rect rect, clip, atlas;
+    Color color;
+    int radius = 0, stroke = 0;
+    bool mask = false;
+};
 class Canvas {
 public:
     Canvas(int w, int h) : w_(w), h_(h), px_(static_cast<size_t>(w) * h, rgba(0, 0, 0)) { resetClip(); }
@@ -37,10 +46,17 @@ public:
     const uint32_t* data() const { return px_.data(); }
     uint32_t* data() { return px_.data(); }
 
+    void enableGpuUi(bool enabled) { gpuUi_ = enabled; }
+    bool gpuUiEnabled() const { return gpuUi_; }
+    const std::vector<GpuUiCommand>& gpuCommands() const { return gpuCommands_; }
+    const uint32_t* gpuAtlas() const { return gpuAtlas_.data(); }
+    uint64_t gpuAtlasGeneration() const { return gpuAtlasGeneration_; }
+    bool gpuAtlasOverflow() const { return gpuAtlasOverflow_; }
     void setClip(Rect r);
     void resetClip() { clip_ = {0, 0, w_, h_}; }
 
     void clear(Color c);
+    void clearTransparent();
     // Alpha-blended, antialiased rounded corners when radius > 0.
     void fillRect(Rect r, Color c, int radius = 0);
     void strokeRect(Rect r, Color c, int thickness, int radius = 0);
@@ -62,6 +78,12 @@ private:
     // Coverage (0..255) of a rounded rectangle at pixel (px, py).
     static uint32_t cornerCoverage(Rect r, int radius, int px, int py);
 
+    bool gpuUi_ = false, gpuAtlasOverflow_ = false;
+    std::vector<GpuUiCommand> gpuCommands_;
+    std::vector<uint32_t> gpuAtlas_;
+    std::unordered_map<uint64_t, Rect> gpuGlyphs_;
+    int atlasX_ = 0, atlasY_ = 0, atlasRow_ = 0;
+    uint64_t gpuAtlasGeneration_ = 0;
     int w_, h_;
     std::vector<uint32_t> px_;
     Rect clip_;

@@ -16,6 +16,10 @@
 #include <chrono>
 #include <cstring>
 #include <exception>
+#include <thread>
+#if defined(__ORBIS__) || defined(__PS4__)
+#include <orbis/libkernel.h>
+#endif
 
 #if !USE_GNUTLS
 #ifdef _WIN32
@@ -485,6 +489,40 @@ void DtlsTransport::stop() {
 }
 
 bool DtlsTransport::send(message_ptr message) {
+    if (!message || state() != State::Connected) return false;
+#if defined(__ORBIS__) || defined(__PS4__)
+    if (mWriteFailed.load()) return false;
+    // A retry must use the same buffer/length. Another writer must not
+    // interleave between WANT_READ/WRITE retries; readers must still progress.
+    std::unique_lock operation(mWriteOperationMutex, std::try_to_lock);
+    if (!operation.owns_lock()) return false;
+    const auto started = std::chrono::steady_clock::now();
+#endif
+    int ret;
+    for (;;) {
+        {
+            std::lock_guard lock(mSslMutex);
+            if (message->size() > size_t(mbedtls_ssl_get_max_out_record_payload(&mSsl))) return false;
+            mCurrentDscp = message->dscp;
+            ret = mbedtls_ssl_write(&mSsl, reinterpret_cast<const unsigned char *>(message->data()), message->size());
+        }
+        if (mbedtls::check(ret)) break;
+#if defined(__ORBIS__) || defined(__PS4__)
+        if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY ||
+            std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(1000)) {
+            // Never reuse a TLS context with an abandoned pending write.
+            // Defer notification: this call may hold usrsctp's send locks.
+            mWriteFailed.store(true);
+            PLOG_ERROR << "dtls_write_stalled error=" << ret << " retry_budget_ms=1000 action=fail_transport";
+            ThreadPool::Instance().enqueue([weak = weak_from_this()] {
+                if (auto self = weak.lock()) { self->changeState(State::Failed); self->recv(nullptr); }
+            });
+            return false;
+        }
+        sceKernelUsleep(1000);
+#endif
+    }
+    return mOutgoingResult;
 }
 
 void DtlsTransport::incoming(message_ptr message) {

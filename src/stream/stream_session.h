@@ -62,6 +62,7 @@ struct StreamOptions {
     // Ultimate; the plain tier is asked for first, so it holds where they
     // aren't granted). Empty: don't send, the service picks.
     std::string resolutionAlias;
+    uint32_t maxFrameRate = 60; // SDP receive preference; server may ignore it.
     // Test hook: drop this percentage of video RTP packets before the jitter
     // buffer, to exercise NACK / key frame recovery.
     int simulatedVideoLoss = 0;
@@ -94,6 +95,8 @@ public:
     bool start(std::string& err);
     bool isOpen() const;
 
+    // True if accepted locally (sent or queued). False if closed, failed, or
+    // backpressure coalesced this sample; it is not a server acknowledgment.
     bool sendGamepad(const GamepadFrame& frame);
     // Voice chat: sends an encoded Opus frame to the stream server (RTP @ 48 kHz).
     void sendAudio(const uint8_t* opus, size_t size, uint32_t timestamp);

@@ -31,11 +31,34 @@ void Canvas::setClip(Rect r) { clip_ = intersect(r, {0, 0, w_, h_}); }
 
 inline void Canvas::blend(uint32_t& dst, Color src, uint32_t a) const {
     if (a == 0) return;
+    if (a >= 255 || (dst >> 24) == 0) {
+        dst = (src & 0x00FFFFFFu) | (a << 24);
         return;
     }
+    const uint32_t dstA = dst >> 24;
+    if (dstA == 255) {
+        const uint32_t inv = 255 - a;
+        const uint32_t rb = (((src & 0x00FF00FFu) * a + (dst & 0x00FF00FFu) * inv + 0x00800080u) >> 8) & 0x00FF00FFu;
+        const uint32_t g = (((src & 0x0000FF00u) * a + (dst & 0x0000FF00u) * inv + 0x00008000u) >> 8) & 0x0000FF00u;
+        dst = 0xFF000000u | rb | g;
+        return;
+    }
+    const uint32_t inv = 255 - a;
+    const uint32_t outA = a + (dstA * inv + 127) / 255;
+    auto composite = [&](uint32_t shift) {
+        const uint32_t srcC = (src >> shift) & 255u;
+        const uint32_t dstC = (dst >> shift) & 255u;
+        const uint32_t premul = srcC * a + (dstC * dstA * inv + 127) / 255;
+        return outA ? (premul + outA / 2) / outA : 0u;
+    };
+    dst = (outA << 24) | (composite(16) << 16) | (composite(8) << 8) | composite(0);
 }
 
 void Canvas::clear(Color c) { std::fill(px_.begin(), px_.end(), c | 0xFF000000u); }
+void Canvas::clearTransparent() {
+    if (gpuUi_) { gpuCommands_.clear(); return; }
+    std::fill(px_.begin(), px_.end(), 0u);
+}
 
 uint32_t Canvas::cornerCoverage(Rect r, int radius, int px, int py) {
     // Distance from the pixel centre to the nearest corner circle centre.
@@ -50,6 +73,10 @@ uint32_t Canvas::cornerCoverage(Rect r, int radius, int px, int py) {
 }
 
 void Canvas::fillRect(Rect r, Color c, int radius) {
+    if (gpuUi_) {
+        gpuCommands_.push_back({r, clip_, {}, c, std::max(0, std::min(radius, std::min(r.w, r.h) / 2)), 0, false});
+        return;
+    }
     Rect b = intersect(r, clip_);
     uint32_t a = alphaOf(c);
     if (b.w <= 0 || b.h <= 0 || a == 0) return;
@@ -66,6 +93,10 @@ void Canvas::fillRect(Rect r, Color c, int radius) {
 }
 
 void Canvas::strokeRect(Rect r, Color c, int t, int radius) {
+    if (gpuUi_) {
+        gpuCommands_.push_back({r, clip_, {}, c, std::max(0, std::min(radius, std::min(r.w, r.h) / 2)), t, false});
+        return;
+    }
     Rect b = intersect(r, clip_);
     uint32_t a = alphaOf(c);
     if (b.w <= 0 || b.h <= 0 || a == 0) return;
@@ -210,6 +241,31 @@ void Canvas::drawImage(const Image& img, int x, int y, uint8_t opacity, int radi
 }
 
 void Canvas::drawMask(const uint8_t* mask, int mw, int mh, int stride, int x, int y, Color c) {
+    if (gpuUi_) {
+        if (!mask || mw <= 0 || mh <= 0) return;
+        // Content key survives font-cache allocation changes; color is a draw parameter.
+        uint64_t key = 1469598103934665603ull;
+        for (int j = 0; j < mh; ++j) for (int i = 0; i < mw; ++i)
+            key = (key ^ mask[j * stride + i]) * 1099511628211ull;
+        key = (key ^ static_cast<uint32_t>(mw)) * 1099511628211ull;
+        key = (key ^ static_cast<uint32_t>(mh)) * 1099511628211ull;
+        auto found = gpuGlyphs_.find(key);
+        Rect tile;
+        if (found != gpuGlyphs_.end()) tile = found->second;
+        else {
+            if (atlasX_ + mw > w_) { atlasX_ = 0; atlasY_ += atlasRow_; atlasRow_ = 0; }
+            if (mw > w_ || atlasY_ + mh > h_) { gpuAtlasOverflow_ = true; return; }
+            if (gpuAtlas_.empty()) gpuAtlas_.resize(static_cast<size_t>(w_) * h_, 0u);
+            tile = {atlasX_, atlasY_, mw, mh};
+            for (int j = 0; j < mh; ++j) for (int i = 0; i < mw; ++i)
+                gpuAtlas_[static_cast<size_t>(atlasY_ + j) * w_ + atlasX_ + i] =
+                    0x00ffffffu | (static_cast<uint32_t>(mask[j * stride + i]) << 24);
+            atlasX_ += mw; atlasRow_ = std::max(atlasRow_, mh);
+            gpuGlyphs_.emplace(key, tile); ++gpuAtlasGeneration_;
+        }
+        gpuCommands_.push_back({{x, y, mw, mh}, clip_, tile, c, 0, 0, true});
+        return;
+    }
     Rect b = intersect({x, y, mw, mh}, clip_);
     uint32_t a = alphaOf(c);
     for (int yy = b.y; yy < b.y + b.h; ++yy) {

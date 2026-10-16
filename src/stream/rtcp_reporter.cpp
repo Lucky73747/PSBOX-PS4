@@ -48,6 +48,7 @@ void RtcpReporter::setMaximumBitrate(uint32_t bitsPerSecond) {
 }
 
 void RtcpReporter::onRtp(const uint8_t* d, size_t n, uint64_t now) {
+    lastRtpAtMs_.store(now / 1000u, std::memory_order_relaxed);
     uint32_t ssrc = get32(d + 8);
     uint16_t seq = get16(d + 2);
     if (!started_ || ssrc != mediaSsrc_) {  // RFC 3550 A.1, without probation
@@ -56,6 +57,8 @@ void RtcpReporter::onRtp(const uint8_t* d, size_t n, uint64_t now) {
         baseSeq_ = seq;
         maxSeq_ = seq;
         cycles_ = 0;
+        bytesSinceReport_ = 0;
+        lastReportUs_ = now;
         received_ = expectedPrior_ = receivedPrior_ = 0;
         haveTransit_ = false;
         jitter_ = 0;
@@ -137,6 +140,7 @@ void RtcpReporter::report(uint64_t now, const rtc::message_callback& send) {
     if (maxBitrate) {
         uint32_t rate = intervalUs ? static_cast<uint32_t>(bytesSinceReport_ * 8 * 1000000 / intervalUs) : 0;
         receiveRate_ = rate;
+        if (rate > maxBitrate) ++receiveRateAboveCapSamples_;
         // Like a receive-side estimator, much simplified: back off below
         // what arrives when the network drops packets, otherwise climb back
         // to the ceiling.
@@ -165,6 +169,9 @@ void RtcpReporter::report(uint64_t now, const rtc::message_callback& send) {
         b.insert(b.end(), {'R', 'E', 'M', 'B'});
         put32(b, (1u << 24) | (uint32_t(exp) << 18) | mantissa);
         put32(b, mediaSsrc_);
+        rembLastRequestedBitrate_.store(est, std::memory_order_relaxed);
+        rembLastRequestAtMs_.store(now / 1000u, std::memory_order_relaxed);
+        ++rembReportsRequested_;
     }
     bytesSinceReport_ = 0;
 

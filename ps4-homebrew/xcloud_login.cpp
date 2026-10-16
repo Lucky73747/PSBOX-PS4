@@ -2,6 +2,7 @@
 #include "xcloud_login.h"
 
 #include "xcloud/catalog.h"
+#include "net/http.h"
 
 #include <algorithm>
 #include <cctype>
@@ -21,6 +22,10 @@ bool loginXcloud(const xc::auth::XblToken& gssvXsts, XcloudLoginInfo& out, std::
     out.region = out.client->region().name;
     out.regionCount = out.client->session().regions.size();
 
+    struct BackgroundCatalogScope {
+        BackgroundCatalogScope() { xc::net::setBackgroundHttpThread(true); }
+        ~BackgroundCatalogScope() { xc::net::setBackgroundHttpThread(false); }
+    } catalogScope;
     constexpr size_t kLibraryTitleLimit = 5000;
     // Use the lightweight Game Pass catalog endpoint instead of the full
     // display-catalog hydration, whose image-heavy response can exceed the

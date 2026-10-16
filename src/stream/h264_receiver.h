@@ -31,6 +31,8 @@ public:
 
     void incoming(rtc::message_vector& messages, const rtc::message_callback& send) override;
 
+    bool requestKeyframe(const rtc::message_callback& send) override;
+
     // Test hook: hold back this percentage of incoming RTP packets and
     // deliver each one 30 ms after it is NACKed, like a retransmission (a real
     // retransmission cannot be tested this way: SRTP drops it as a replay).
@@ -67,6 +69,7 @@ private:
     int64_t highest_ = -1;    // highest extended sequence number seen
     int64_t nextSeq_ = -1;    // first packet of the next frame to emit; -1 = resync
     bool waitingKeyframe_ = true;
+    std::atomic<uint32_t> mediaSsrc_{0};
     uint64_t lastKeyframeRequestMs_ = 0;
     int simulatedLoss_ = 0;
     uint32_t lossState_ = 12345;

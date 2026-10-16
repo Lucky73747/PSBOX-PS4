@@ -3,6 +3,9 @@
 // RTCP receiver side of a track: RFC 3550 receiver reports (loss, jitter,
 // LSR/DLSR for the sender's RTT) and, for video, REMB bandwidth estimates.
 //
+// The xCloud server negotiates goog-remb for congestion control. REMB here is
+// receiver feedback requested from the server, not an acknowledgment or a
+// guaranteed hard cap on the incoming media rate.
 // libdatachannel's RtcpReceivingSession reports a highest sequence number of
 // 0, no loss and no jitter, and sends REMB only if asked: the server then
 // shows the "slow connection" icon and keeps the bitrate low.
@@ -25,8 +28,14 @@ public:
 
     void incoming(rtc::message_vector& messages, const rtc::message_callback& send) override;
 
+    // Last locally advertised REMB request and measured receive rate, bits/s.
     uint32_t estimate() const { return estimate_; }
     uint32_t receiveRate() const { return receiveRate_; }
+    uint64_t lastRtpAtMs() const { return lastRtpAtMs_.load(std::memory_order_relaxed); }
+    uint64_t rembReportsRequested() const { return rembReportsRequested_.load(std::memory_order_relaxed); }
+    uint64_t rembLastRequestAtMs() const { return rembLastRequestAtMs_.load(std::memory_order_relaxed); }
+    uint32_t rembLastRequestedBitrate() const { return rembLastRequestedBitrate_.load(std::memory_order_relaxed); }
+    uint64_t receiveRateAboveCapSamples() const { return receiveRateAboveCapSamples_.load(std::memory_order_relaxed); }
     // Safe to update from the app thread; incoming()/report() remain single-writer.
     void setMaximumBitrate(uint32_t bitsPerSecond);
 
@@ -51,6 +60,9 @@ private:
     uint64_t lastReportUs_ = 0;
     uint64_t bytesSinceReport_ = 0;
     std::atomic<uint32_t> estimate_{0}, receiveRate_{0};
+    std::atomic<uint64_t> lastRtpAtMs_{0};
+    std::atomic<uint64_t> rembReportsRequested_{0}, rembLastRequestAtMs_{0}, receiveRateAboveCapSamples_{0};
+    std::atomic<uint32_t> rembLastRequestedBitrate_{0};
 };
 
 }  // namespace xc::stream

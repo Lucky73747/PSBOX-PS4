@@ -62,6 +62,13 @@ std::string tlsInitError();
 void shutdownTls();
 
 Response perform(const Request& req);
+#if defined(__ORBIS__)
+// PS4 background catalog/artwork traffic yields to active gameplay. Aborted
+// background requests retry after resuming; session/auth requests stay active.
+void setBackgroundHttpThread(bool background);
+bool pauseBackgroundHttp(bool paused);
+bool backgroundHttpPaused();
+#endif
 
 // Helpers.
 std::string urlEncode(const std::string& s);

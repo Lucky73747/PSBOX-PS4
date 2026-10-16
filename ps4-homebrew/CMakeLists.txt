@@ -119,6 +119,7 @@ target_include_directories(xcloud_homebrew PRIVATE
   "${ORBIS_MESA_SRC}/include")
 # Keep the RADV archive whole so the linked ICD retains its entry points. The
 # explicit -Wl form is required by the Clang 21 driver in this workspace.
+target_link_options(xcloud_homebrew PRIVATE "-Wl,--wrap=sceVideoOutSubmitFlip")
 target_link_libraries(xcloud_homebrew PRIVATE
   -Wl,--whole-archive "${_radv_archive}" -Wl,--no-whole-archive
   "${XC_PS4_SDL3_BUILD}/libSDL3.a"
@@ -137,9 +138,20 @@ if(COMMAND ps4_create_pkg)
   foreach(_font Inter-Regular.ttf Inter-SemiBold.ttf Inter-Bold.ttf)
     configure_file("${CMAKE_CURRENT_LIST_DIR}/../assets/fonts/${_font}" "${_assets}/fonts/${_font}" COPYONLY)
   endforeach()
+  configure_file("${CMAKE_CURRENT_LIST_DIR}/../assets/fonts/OFL.txt" "${_assets}/fonts/OFL.txt" COPYONLY)
+  file(MAKE_DIRECTORY "${_assets}/licenses")
+  configure_file("${CMAKE_CURRENT_LIST_DIR}/../LICENSE" "${_assets}/licenses/LICENSE" COPYONLY)
+  configure_file("${CMAKE_CURRENT_LIST_DIR}/../THIRD_PARTY_NOTICES.md" "${_assets}/licenses/THIRD_PARTY_NOTICES.md" COPYONLY)
+  configure_file("${CMAKE_CURRENT_LIST_DIR}/../extern/fsr1/LICENSE.txt" "${_assets}/licenses/AMD-FSR1.txt" COPYONLY)
   ps4_create_pkg(xcloud_homebrew
     TITLE_ID XCHM00001
+    CONTENT_LABEL PSBOXPS4
+    ICON "${CMAKE_CURRENT_LIST_DIR}/../assets/ps4/icon0.png"
     EXTRA_FILES
       "${_assets}/fonts/Inter-Regular.ttf:assets/fonts/Inter-Regular.ttf"
       "${_assets}/fonts/Inter-SemiBold.ttf:assets/fonts/Inter-SemiBold.ttf"
+      "${_assets}/fonts/Inter-Bold.ttf:assets/fonts/Inter-Bold.ttf"
+      "${_assets}/fonts/OFL.txt:assets/fonts/OFL.txt"
+      "${_assets}/licenses/AMD-FSR1.txt:licenses/AMD-FSR1.txt"
+      "${_assets}/licenses/LICENSE:licenses/LICENSE"
 endif()

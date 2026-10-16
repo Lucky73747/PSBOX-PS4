@@ -151,6 +151,18 @@ void ImageCache::trimDisk() {
 }
 
 void ImageCache::loop() {
+    auto awaitGameplayPause = [this]() {
+#if defined(__ORBIS__)
+        bool logged = false;
+        while (net::backgroundHttpPaused()) {
+            { std::lock_guard<std::mutex> lock(mutex_); if (stop_) return false; }
+            if (!logged) { XC_LOGI("background_artwork paused=1 disk_decode_resize=paused"); logged = true; }
+            platform::sleepMs(10);
+        }
+        if (logged) XC_LOGI("background_artwork paused=0 disk_decode_resize=resumed");
+#endif
+        return true;
+    };
     for (;;) {
         Job job;
         {
@@ -158,6 +170,7 @@ void ImageCache::loop() {
             cv_.wait(lock, [this] { return stop_ || !jobs_.empty(); });
             if (stop_) return;
         }
+        if (!awaitGameplayPause()) return;
         net::Request req;
         req.url = sizedUrl(job.url, job.w, job.h);
         req.headers = {{"Accept", "image/*"}};
@@ -165,8 +178,10 @@ void ImageCache::loop() {
         std::shared_ptr<Image> result;
         std::string cached;
         net::Response r;
+            r = net::perform(req);
             }
         }
+        if (!awaitGameplayPause()) return;
         if (r.ok() && decoded.w > 0) {
             result = std::make_shared<Image>(decoded.w == job.w && decoded.h == job.h
                                                  ? std::move(decoded)

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "video_playout_queue.h"
 #include <cstddef>
 #include <cstdint>
 #include <array>
@@ -20,6 +21,9 @@ struct DecoderState;
 void setVideoDiagnosticSink(void (*sink)(const char*));
 
 struct VideoPerformanceSnapshot {
+    uint32_t snapshotBusy = 0;
+    uint32_t stage = 0;
+    uint64_t stageAgeMs = 0;
     uint64_t generation = 0;
     uint32_t decoded = 0;
     uint32_t published = 0;
@@ -35,14 +39,22 @@ struct VideoPerformanceSnapshot {
     uint32_t width = 0;
     uint32_t height = 0;
     uint64_t receivedAccessUnits = 0, acceptedAccessUnits = 0, dequeuedAccessUnits = 0, failedAccessUnits = 0;
+    uint64_t catchupDroppedAccessUnits = 0;
     uint64_t droppedAccessUnits = 0, emptyOutputs = 0, totalDecoded = 0, totalPublished = 0;
     uint64_t lastInputAgeMs = 0, lastOutputAgeMs = 0;
     uint32_t queuedAccessUnits = 0;
+    uint32_t playoutDepth = 0;
+    uint64_t playoutUploaded = 0, playoutReplaced = 0, playoutRepeated = 0, playoutPrimeWaits = 0, playoutSequence = 0;
     int32_t decoderCpu = -1;
     int32_t conversionCallerCpu = -1;
     int32_t converterCpus[3] = {-1, -1, -1};
 };
 
+enum class VideoResetRequestReason : uint8_t { UserMasterButton = 1, AdaptiveWatchdog = 2 };
+
+// PS4 Videodec2 adapter. Decoded pictures stay as NV12 for the Vulkan video
+// compositor when enabled, or are converted to RGBA for the CPU fallback. This
+// class never opens or submits a VideoOut buffer.
 class VideoDecoder {
 public:
     VideoDecoder();
@@ -51,9 +63,13 @@ public:
     VideoDecoder& operator=(const VideoDecoder&) = delete;
 
     bool start();
+    void requestReset(VideoResetRequestReason reason = VideoResetRequestReason::UserMasterButton);
     bool takeKeyframeRequest();
     void stop();
     bool pushAccessUnit(const uint8_t* data, size_t size, uint32_t rtpTimestamp);
+    void setGpuVideoEnabled(bool enabled) { gpuVideoEnabled_.store(enabled, std::memory_order_relaxed); }
+    void setPlayoutDelayFrames(uint32_t frames) { playoutDelayFrames_.store(frames ? 1 : 0); }
+    void setPresentationFps(uint32_t fps) { presentationFps_.store(fps == 30 ? 30 : 60, std::memory_order_relaxed); }
     bool hasFrame() const;
     VideoPerformanceSnapshot performanceSnapshot() const;
 
@@ -68,6 +84,8 @@ private:
         size_t index = 0;
     };
     void run();
+    void markStage(uint32_t stage);
+    bool initializeDecoder(uint32_t pipelineDepth = 2);
     bool resetDecoder(const char* reason);
     bool decode(const AccessUnit& accessUnit, bool publishOutput, size_t queueDepth);
     bool publishNv12(const void* data, size_t available, uint32_t width,
@@ -76,10 +94,18 @@ private:
     void convertRows(const uint8_t* yPlane, const uint8_t* uvPlane, uint32_t width,
     void stopConversionWorkers();
 
+    std::atomic<uint32_t> diagnosticStage_{0};
+    std::atomic<uint64_t> diagnosticStageAtUs_{0};
+    mutable std::mutex playoutMutex_;
+    std::vector<uint8_t> nv12UploadScratch_;
     mutable std::mutex mutex_;
     std::condition_variable wake_;
     std::deque<AccessUnit> queue_;
     std::vector<uint32_t> latestRgba_;
+    VideoPlayoutQueue playout_;
+    std::atomic<uint32_t> presentationFps_{60}, playoutDelayFrames_{0};
+    std::vector<uint8_t> nv12PublishScratch_;
+    std::atomic<bool> gpuVideoEnabled_{false};
     std::vector<uint32_t> rgbaScratch_;
     // Snapshot copied under mutex, then scaled after releasing the decoder
     // lock so the publishing thread is not blocked by the 1080p canvas pass.
@@ -92,16 +118,24 @@ private:
     uint32_t scaleOutputHeight_ = 0;
     uint32_t latestWidth_ = 0;
     uint32_t latestHeight_ = 0;
+    std::atomic<uint64_t> latestSequence_{0};
     uint64_t lastCopiedSequence_ = 0;
     uint64_t decodedFrames_ = 0;
     uint64_t publishedFrames_ = 0;
     uint64_t skippedOutputFrames_ = 0;
     uint64_t decodedFramesInFirst10s_ = 0;
+    std::atomic<uint64_t> droppedAccessUnits_{0}, catchupDroppedAccessUnits_{0};
     std::atomic<uint64_t> rejectedInvalidAccessUnits_{0};
     std::atomic<uint64_t> receivedAccessUnits_{0}, acceptedAccessUnits_{0}, dequeuedAccessUnits_{0}, failedAccessUnits_{0};
     std::atomic<uint64_t> emptyOutputs_{0}, totalDecoded_{0}, totalPublished_{0};
     std::atomic<uint64_t> lastInputTimeUs_{0}, lastOutputTimeUs_{0};
     std::atomic<bool> resetRequested_{false}, keyframeNeeded_{false};
+    std::atomic<VideoResetRequestReason> resetRequestReason_{VideoResetRequestReason::UserMasterButton};
+    std::atomic<bool> discontinuity_{false}, inputGap_{false};
+    uint64_t recoveryRequestUs_ = 0;
+    struct StageCost { uint64_t sum = 0, peak = 0, calls = 0; };
+    std::array<StageCost, 7> stageCosts_{};
+    uint64_t timedAccessUnits_ = 0;
     uint64_t decodeTimeUsWindow_ = 0;
     uint64_t queueWaitTimeUsWindow_ = 0;
     uint64_t queueWaitSamplesWindow_ = 0;

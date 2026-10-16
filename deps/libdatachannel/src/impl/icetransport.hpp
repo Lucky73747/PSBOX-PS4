@@ -30,6 +30,7 @@
 
 namespace rtc::impl {
 
+class IceTransport : public Transport, public std::enable_shared_from_this<IceTransport> {
 public:
 	static void Init();
 	static void Cleanup();

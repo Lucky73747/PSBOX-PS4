@@ -14,6 +14,7 @@
 #include "ui/app_ui.h"
 #include "ui/image_cache.h"
 #include "video_decoder.h"
+#include "video_repeat_watchdog.h"
 #include "stream/stream_session.h"
 #include "platform/platform.h"
 #include "util/json.h"
@@ -40,6 +41,8 @@
 #include <memory>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
+#include <condition_variable>
 #include <vector>
 
 namespace {
@@ -47,15 +50,19 @@ constexpr const char* kLogDirectory = "/data/PSBOX";
 constexpr const char* kAppLogPath = "/data/PSBOX/xcloud.log";
 
 void logLine(const char* fmt, ...) {
+    char body[1536];
     va_list ap;
     va_start(ap, fmt);
     std::vsnprintf(body, sizeof(body), fmt, ap);
     va_end(ap);
+    char line[1664];
     std::snprintf(line, sizeof(line), "[%s] %s\n", kBuild, body);
+    XC_LOGI("%s", line);
 }
 
 struct StreamProfile {
-    std::string tier = "720";
+    uint32_t frameRate = 60;
+    bool automaticVideoReset = false;
     uint32_t lastQueueMax = 0;
     uint32_t lastDecodeAvgUs = 0;
     uint32_t lastConvertAvgUs = 0;
@@ -64,6 +71,9 @@ struct StreamProfile {
 
 constexpr const char* kStreamProfilePath = "/data/PSBOX/stream_profile.json";
 constexpr uint32_t k1080Bitrate = 25000000;
+constexpr std::array<uint32_t, 10> kSelectableBitrates = {
+    3000000, 4000000, 6000000, 8000000, 10000000,
+    12000000, 15000000, 20000000, 25000000, 30000000
 };
 
 uint32_t normalizeBitrate(uint64_t bitrate) {
@@ -93,9 +103,14 @@ StreamProfile loadStreamProfile() {
         return profile;
     }
     profile.tier = (*parsed)["tier"].str();
+    profile.frameRate = (*parsed)["frame_rate"].asInt() == 30 ? 30 : 60;
+    profile.rcasSharpness = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["fsr_rcas_sharpness"].asInt(2), 0, 4));
+    profile.automaticVideoReset = (*parsed)["automatic_video_reset"].asBool(false);
     const int64_t storedBitrate = (*parsed)["max_bitrate"].asInt();
     profile.maxBitrate = storedBitrate > 0
         ? normalizeBitrate(static_cast<uint64_t>(storedBitrate))
+        : (profile.tier == "720" ? k720Bitrate : k1080Bitrate);
+    profile.lastQueueMax = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["queue_max"].asInt(), 0, 18));
     profile.lastDecodeAvgUs = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["decode_avg_us"].asInt(), 0, 1000000));
     profile.lastConvertAvgUs = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["convert_avg_us"].asInt(), 0, 1000000));
     profile.lastSkipPermille = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["skip_permille"].asInt(), 0, 1000));
@@ -107,6 +122,11 @@ StreamProfile loadStreamProfile() {
 bool saveStreamProfile(const StreamProfile& profile) {
     xc::json::Value value = xc::json::Value::object();
     value.set("tier", profile.tier);
+    value.set("frame_rate", static_cast<int64_t>(profile.frameRate));
+    value.set("automatic_video_reset", profile.automaticVideoReset);
+    value.set("gpu_upscaler", static_cast<int64_t>(profile.upscaler));
+    value.set("frame_wait", static_cast<int64_t>(profile.frameWait));
+    value.set("fsr_rcas_sharpness", static_cast<int64_t>(profile.rcasSharpness));
     value.set("max_bitrate", static_cast<int64_t>(profile.maxBitrate));
     value.set("queue_max", static_cast<int64_t>(profile.lastQueueMax));
     value.set("decode_avg_us", static_cast<int64_t>(profile.lastDecodeAvgUs));
@@ -394,6 +414,9 @@ void clearRefreshTokenCache() {
 
 struct LoginState {
     std::mutex mutex;
+    bool gpuVideoActive = false;
+    std::atomic<uint32_t> streamWorkerStep{0};
+    std::atomic<uint64_t> streamWorkerStepAtMs{0};
     LoginStage stage = LoginStage::Starting;
     std::string verificationUri;
     std::string verificationUriComplete;
@@ -410,8 +433,6 @@ struct LoginState {
     std::string sessionMessage;
     bool stopSessionRequested = false;
     bool streamTransportLost = false;
-    std::string streamTier = "720";
-    uint32_t streamBitrateCap = k720Bitrate;
     uint32_t streamRembEstimate = 0;
     uint32_t streamReceiveRate = 0;
     int streamRttMs = -1;
@@ -422,9 +443,12 @@ struct LoginState {
     uint32_t streamDecodeAvgUs = 0, streamConvertAvgUs = 0;
     uint64_t streamStatsGeneration = 0;
     bool streamSettingsOpen = false;
+    bool streamFsrSettingsOpen = false;
     uint8_t streamSettingsRow = 0;
-    std::string streamDraftTier = "720";
-    uint32_t streamDraftBitrate = k720Bitrate;
+    uint32_t streamFrameRate = 60, streamDraftFrameRate = 60;
+    bool streamAutoReset = false, streamDraftAutoReset = false;
+    uint32_t streamUpscaler = 1, streamDraftUpscaler = 1;
+    uint32_t streamFrameWait = 0, streamDraftFrameWait = 0;
     size_t selectedTitle = 0;
     int expiresInSec = 0;
     uint64_t generation = 1;
@@ -459,9 +483,14 @@ struct LoginSnapshot {
     uint32_t streamDecodeAvgUs, streamConvertAvgUs;
     uint64_t streamStatsGeneration;
     bool streamSettingsOpen;
+    bool streamFsrSettingsOpen = false;
     uint8_t streamSettingsRow;
     std::string streamDraftTier;
     uint32_t streamDraftBitrate;
+    uint32_t streamFrameRate = 60, streamDraftFrameRate = 60;
+    bool streamAutoReset = false, streamDraftAutoReset = false;
+    uint32_t streamUpscaler = 1, streamDraftUpscaler = 1;
+    uint32_t streamFrameWait = 0, streamDraftFrameWait = 0;
 };
 
     std::lock_guard<std::mutex> lock(state.mutex);
@@ -472,6 +501,8 @@ struct LoginSnapshot {
             state.streamNewVideoFps, state.streamPublishedFps, state.streamQueueDepth,
             state.streamQueuePeak, state.streamQueueWaitAvgUs, state.streamQueueWaitMaxUs,
             state.streamDecodeAvgUs, state.streamConvertAvgUs, state.streamStatsGeneration,
+            state.streamFrameRate, state.streamDraftFrameRate,
+            state.streamAutoReset, state.streamDraftAutoReset, state.streamUpscaler, state.streamDraftUpscaler,
 }
 
 void setStage(LoginState& state, LoginStage stage, const std::string& error = {}) {
@@ -534,6 +565,20 @@ bool finishXboxLogin(LoginState& state, xc::auth::MsaTokens& msaTokens) {
     xc::ps4::XcloudLoginInfo info;
     bool libraryPublished = false;
     auto publishLibrary = [&](const xc::ps4::XcloudLoginInfo& update, bool complete) {
+        // Pause catalog pagination at a batch boundary while the media session
+        // owns the connection/CPU budget. Never wait holding the UI mutex.
+        bool paused = false;
+        for (;;) {
+            bool mediaActive;
+            {
+                std::lock_guard<std::mutex> lock(state.mutex);
+                mediaActive = state.stage == LoginStage::SessionStarting ||
+            }
+            if (!mediaActive) break;
+            if (!paused) { logLine("library background pagination paused for active stream"); paused = true; }
+            sceKernelUsleep(100000);
+        }
+        if (paused) logLine("library background pagination resumed");
         size_t count = update.titles.size();
         {
             std::lock_guard<std::mutex> lock(state.mutex);
@@ -604,6 +649,9 @@ struct SessionJob {
 xc::stream::GamepadFrame readStreamGamepad(const Controller& controller);
 
 void* sessionWorker(void* opaque) {
+    struct ResumeBackgroundOnExit {
+        ~ResumeBackgroundOnExit() { xc::net::pauseBackgroundHttp(false); }
+    } resumeBackgroundOnExit;
     std::unique_ptr<SessionJob> job(static_cast<SessionJob*>(opaque));
     auto& state = *job->state;
     std::string error;
@@ -748,6 +796,10 @@ void* sessionWorker(void* opaque) {
             streamOptions.enableIceUdpMux = true;
             streamOptions.resolutionAlias = streamProfile.tier;
             streamOptions.maxBitrate = streamProfile.maxBitrate;
+            streamOptions.maxFrameRate = streamProfile.frameRate;
+            // Recovery already requests IDR on loss/discontinuity. Periodic
+            // unconditional IDRs add bursts even when the picture is healthy.
+            streamOptions.keyframeIntervalSec = 0;
             logLine("stream media config resolution=%sp remb_cap=%u decoder_max=1920x1088 adaptive=queue+decode+convert",
                     streamProfile.tier.c_str(), streamProfile.maxBitrate);
             xc::stream::StreamSession stream(*job->gssv, std::move(callbacks), std::move(streamOptions));
@@ -768,25 +820,41 @@ void* sessionWorker(void* opaque) {
             {
                 std::lock_guard<std::mutex> lock(state.mutex);
                 state.streamTransportLost = false;
+                state.streamFrameRate = streamProfile.frameRate;
                 state.streamTier = streamProfile.tier;
                 state.streamBitrateCap = streamProfile.maxBitrate;
                 state.streamSettingsOpen = false;
+                state.streamAutoReset = streamProfile.automaticVideoReset;
+                state.streamUpscaler = streamProfile.upscaler;
+                state.streamRcasSharpness = streamProfile.rcasSharpness;
+                state.streamFrameWait = streamProfile.frameWait;
+                state.streamFsrSettingsOpen = false;
             }
             logLine("WebRTC connected; waiting for H.264 pictures and controller reports");
+            logLine("video_scaler policy=vulkan_nv12_preferred cpu_fallback=available actual_path_in_stream_metrics=1");
             bool requestedStop = false;
             uint64_t nextGamepadAt = sceKernelGetProcessTime() / 1000u;
+
             uint64_t nextPerformanceCheckAt = nextGamepadAt;
             uint64_t nextVideoFlowLogAt = nextGamepadAt;
             uint64_t lastVideoDrops = 0;
             xc::stream::GamepadFrame lastGamepad{};
             bool firstGamepadReport = true;
             bool previousTouchpad = false;
+            bool previousCircle = false, previousCross = false, previousTriangle = false;
             bool settingsOpen = false, settingsOpenLatched = false;
             uint64_t optionsHeldSince = 0;
             uint64_t nextSettingsRepeatAt = 0;
             uint8_t settingsRow = 0;
             std::string draftTier = streamProfile.tier;
             uint32_t draftBitrate = streamProfile.maxBitrate;
+            uint32_t draftFps = streamProfile.frameRate;
+            bool draftAutoReset = streamProfile.automaticVideoReset;
+            uint32_t draftUpscaler = streamProfile.upscaler;
+            uint32_t draftFrameWait = streamProfile.frameWait;
+            uint32_t draftRcasSharpness = streamProfile.rcasSharpness;
+            bool fsrSettingsOpen = false;
+            StreamProfile settingsOriginal = streamProfile;
             uint64_t nextHudStatsAt = nextGamepadAt;
             uint64_t decoderResetHeldSince = 0;
             bool decoderResetLatched = false;
@@ -797,7 +865,191 @@ void* sessionWorker(void* opaque) {
             uint32_t pressureWindows = 0;
             StreamProfile profileToSave = streamProfile;
             xc::ps4::VideoPerformanceSnapshot lastVideoPerformance{};
+            std::mutex sendStateMutex;
+            std::condition_variable sendStateChanged;
+            xc::stream::GamepadFrame latestGamepad{};
+            uint64_t latestGamepadSampleAtMs = 0;
+            uint64_t latestGamepadGeneration = 0;
+            std::atomic<bool> inputMuted{false};
+            std::atomic<uint64_t> guidePulseUntil{0};
+            std::atomic<bool> stopInputPoll{false};
+            std::atomic<bool> stopGamepadSender{false};
+            std::atomic<bool> stopGamepadMetrics{false};
+            std::atomic<uint64_t> gamepadAttempts{0}, gamepadAccepted{0}, gamepadRejected{0};
+            std::atomic<uint64_t> gamepadSendDurationUsMax{0};
+            std::atomic<uint64_t> gamepadInputAgeMaxMs{0};
+            std::atomic<uint64_t> gamepadSendStartedAtMs{0};
+            std::atomic<uint64_t> controllerPollCalls{0};
+            std::atomic<bool> maintenanceStop{false}, pendingKeyframe{false};
+            std::atomic<int> pendingResolution{0}, cachedRtt{-1};
+            std::atomic<uint32_t> maintenancePhase{0};
+            std::atomic<uint64_t> maintenanceAtMs{0};
+            std::mutex profileWriteMutex;
+            bool profileWritePending = false;
+            StreamProfile pendingProfile = streamProfile;
+            auto queueProfileWrite = [&](const StreamProfile& value) {
+                std::lock_guard<std::mutex> lock(profileWriteMutex);
+                pendingProfile = value; profileWritePending = true;
+            };
+            std::thread maintenance([&]() {
+                uint64_t nextTick = 0, lastKeyframe = 0;
+                auto phase = [&](uint32_t value) {
+                    maintenanceAtMs.store(sceKernelGetProcessTime() / 1000u);
+                    maintenancePhase.store(value);
+                };
+                while (!maintenanceStop.load()) {
+                    const uint64_t now = sceKernelGetProcessTime() / 1000u;
+                    const int resolution = pendingResolution.exchange(0);
+                    if (resolution) { phase(1); stream.requestResolution(resolution == 1080 ? "1080" : "720"); }
+                    if (pendingKeyframe.load() && now - lastKeyframe >= 1000) {
+                        pendingKeyframe.store(false); lastKeyframe = now;
+                        phase(2); stream.requestKeyframe();
+                        logLine("video_recovery action=request_keyframe coalesced=1 decoder_reset=0");
+                    }
+                    if (now >= nextTick) {
+                        nextTick = now + 1000;
+                        phase(3); stream.tick();
+                        phase(4); cachedRtt.store(stream.rttMs());
+                    }
+                    bool write = false; StreamProfile profile;
+                    {
+                        std::lock_guard<std::mutex> lock(profileWriteMutex);
+                        if (profileWritePending) { profile = pendingProfile; profileWritePending = false; write = true; }
+                    }
+                    if (write) { phase(5); saveStreamProfile(profile); }
+                    phase(0); sceKernelUsleep(10000);
+                }
+            });
+            std::mutex gamepadIntervalMutex;
+            std::array<uint64_t, 512> gamepadIntervalsUs{};
+            size_t gamepadIntervalCount = 0;
+            auto workerStep = [&state](uint32_t step) {
+                state.streamWorkerStepAtMs.store(sceKernelGetProcessTime() / 1000u, std::memory_order_relaxed);
+                state.streamWorkerStep.store(step, std::memory_order_release);
+            };
+            std::thread inputPoller([&]() {
+                while (!stopInputPoll.load(std::memory_order_acquire)) {
+                    if (job->controller) job->controller->pump();
+                    ++controllerPollCalls;
+                    auto sampled = job->controller ? readStreamGamepad(*job->controller) : xc::stream::GamepadFrame{};
+                    const uint64_t sampledAt = sceKernelGetProcessTime() / 1000u;
+                    if (sampledAt < guidePulseUntil.load(std::memory_order_relaxed))
+                        sampled.buttons |= xc::stream::kNexus;
+                    if (job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_LEFT_STICK) &&
+                        job->controller->button(SDL_GAMEPAD_BUTTON_RIGHT_STICK))
+                        sampled.buttons &= ~(xc::stream::kLeftThumb | xc::stream::kRightThumb);
+                    if (inputMuted.load(std::memory_order_acquire)) sampled = {};
+                    {
+                        std::lock_guard<std::mutex> lock(sendStateMutex);
+                        latestGamepad = sampled;
+                        latestGamepadSampleAtMs = sampledAt;
+                        ++latestGamepadGeneration;
+                    }
+                    sendStateChanged.notify_one();
+                    sceKernelUsleep(4000);
+                }
+            });
+            std::thread gamepadSender([&]() {
+                uint64_t sentGeneration = 0;
+                uint64_t previousCallStartUs = 0;
+                while (!stopGamepadSender.load(std::memory_order_acquire)) {
+                    xc::stream::GamepadFrame frame{};
+                    uint64_t sampleAtMs = 0, generation = 0;
+                    {
+                        std::unique_lock<std::mutex> lock(sendStateMutex);
+                        sendStateChanged.wait(lock, [&]() {
+                            return stopGamepadSender.load(std::memory_order_acquire) ||
+                                   latestGamepadGeneration != sentGeneration;
+                        });
+                        if (stopGamepadSender.load(std::memory_order_acquire)) break;
+                        frame = latestGamepad;
+                        sampleAtMs = latestGamepadSampleAtMs;
+                        generation = latestGamepadGeneration;
+                    }
+                    const uint64_t nowMs = sceKernelGetProcessTime() / 1000u;
+                    if (stream.isOpen()) {
+                        const uint64_t callStartUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count());
+                        if (previousCallStartUs) {
+                            std::lock_guard<std::mutex> lock(gamepadIntervalMutex);
+                            if (gamepadIntervalCount < gamepadIntervalsUs.size())
+                                gamepadIntervalsUs[gamepadIntervalCount++] = callStartUs - previousCallStartUs;
+                        }
+                        previousCallStartUs = callStartUs;
+                        ++gamepadAttempts;
+                        gamepadSendStartedAtMs.store(nowMs, std::memory_order_release);
+                        const uint64_t inputAgeMs = sampleAtMs && nowMs >= sampleAtMs ? nowMs - sampleAtMs : 0;
+                        uint64_t oldAge = gamepadInputAgeMaxMs.load();
+                        while (inputAgeMs > oldAge && !gamepadInputAgeMaxMs.compare_exchange_weak(oldAge, inputAgeMs)) {}
+                        const auto begin = std::chrono::steady_clock::now();
+                        const bool accepted = stream.sendGamepad(frame);
+                        gamepadSendStartedAtMs.store(0, std::memory_order_release);
+                        const uint64_t elapsedUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - begin).count());
+                        uint64_t oldMax = gamepadSendDurationUsMax.load();
+                        while (elapsedUs > oldMax && !gamepadSendDurationUsMax.compare_exchange_weak(oldMax, elapsedUs)) {}
+                        if (accepted) ++gamepadAccepted; else ++gamepadRejected;
+                    }
+                    sentGeneration = generation;
+                }
+            });
+            std::thread gamepadMetrics([&]() {
+                uint64_t windowStart = sceKernelGetProcessTime() / 1000u;
+                uint64_t lastAttempts = 0, lastAccepted = 0, lastRejected = 0;
+                while (!stopGamepadMetrics.load(std::memory_order_acquire)) {
+                    sceKernelUsleep(100000);
+                    const uint64_t nowMs = sceKernelGetProcessTime() / 1000u;
+                    const uint64_t elapsedMs = nowMs - windowStart;
+                    if (elapsedMs < 1000) continue;
+                    const uint64_t attempts = gamepadAttempts.load();
+                    const uint64_t accepted = gamepadAccepted.load();
+                    const uint64_t rejected = gamepadRejected.load();
+                    const uint64_t attemptDelta = attempts - lastAttempts;
+                    const uint64_t acceptedDelta = accepted - lastAccepted;
+                    const uint64_t rejectedDelta = rejected - lastRejected;
+                    const uint64_t polls = controllerPollCalls.exchange(0);
+                    std::vector<uint64_t> intervals;
+                    {
+                        std::lock_guard<std::mutex> lock(gamepadIntervalMutex);
+                        intervals.assign(gamepadIntervalsUs.begin(), gamepadIntervalsUs.begin() + gamepadIntervalCount);
+                        gamepadIntervalCount = 0;
+                    }
+                    std::sort(intervals.begin(), intervals.end());
+                    const uint64_t intervalMinUs = intervals.empty() ? 0 : intervals.front();
+                    const size_t p99Index = intervals.empty() ? 0 : (intervals.size() * 99 + 99) / 100 - 1;
+                    const uint64_t intervalP99Us = intervals.empty() ? 0 : intervals[p99Index];
+                    const uint64_t sendStarted = gamepadSendStartedAtMs.load(std::memory_order_acquire);
+                    const uint64_t inFlightMs = sendStarted && nowMs >= sendStarted ? nowMs - sendStarted : 0;
+                    logLine("GAMEPAD TX rate window_ms=%llu input_poll_calls=%llu input_poll_hz=%.2f calls=%llu accepted=%llu coalesced_or_failed=%llu calls_per_sec=%.2f accepted_per_sec=%.2f intervals_n=%zu interval_min_ms=%.3f interval_p99_ms=%.3f max_send_ms=%.2f input_age_max_ms=%llu in_flight_ms=%llu policy=latest_sample_no_backlog local_acceptance_only=1",
+                        static_cast<unsigned long long>(elapsedMs), static_cast<unsigned long long>(polls),
+                        elapsedMs ? polls * 1000.0 / elapsedMs : 0.0,
+                        static_cast<unsigned long long>(attemptDelta), static_cast<unsigned long long>(acceptedDelta),
+                        static_cast<unsigned long long>(rejectedDelta),
+                        elapsedMs ? attemptDelta * 1000.0 / elapsedMs : 0.0,
+                        elapsedMs ? acceptedDelta * 1000.0 / elapsedMs : 0.0,
+                        intervals.size(), intervalMinUs / 1000.0, intervalP99Us / 1000.0,
+                        gamepadSendDurationUsMax.exchange(0) / 1000.0,
+                        static_cast<unsigned long long>(gamepadInputAgeMaxMs.exchange(0)),
+                        static_cast<unsigned long long>(inFlightMs));
+                    const auto decoder = job->video->performanceSnapshot();
+                    const auto renderer = xc::ps4::presentationHeartbeat();
+                    const auto& media = stream.videoStats();
+                    const uint64_t phaseAt = maintenanceAtMs.load();
+                    logLine("pipeline_health renderer_stage=%u renderer_age_ms=%llu decoder_stage=%u decoder_stage_age_ms=%llu decoder_input_age_ms=%llu decoder_output_age_ms=%llu decoder_queue=%u snapshot_busy=%u rtp_age_ms=%llu rtp_packets=%llu maintenance_stage=%u maintenance_age_ms=%llu",
+                        renderer.stage, static_cast<unsigned long long>(renderer.ageMs), decoder.stage,
+                        static_cast<unsigned long long>(decoder.stageAgeMs),
+                        static_cast<unsigned long long>(decoder.lastInputAgeMs), static_cast<unsigned long long>(decoder.lastOutputAgeMs),
+                        decoder.queuedAccessUnits, decoder.snapshotBusy, static_cast<unsigned long long>(media.lastRtpAgeMs.load()),
+                        static_cast<unsigned long long>(media.packets.load()), maintenancePhase.load(),
+                        static_cast<unsigned long long>(phaseAt && nowMs >= phaseAt ? nowMs-phaseAt : 0));
+                    windowStart = nowMs;
+                    lastAttempts = attempts;
+                    lastAccepted = accepted;
+                    lastRejected = rejected;
+                }
+            });
             while (true) {
+                workerStep(1);
                 {
                     std::lock_guard<std::mutex> lock(state.mutex);
                     requestedStop = state.stopSessionRequested;
@@ -805,6 +1057,8 @@ void* sessionWorker(void* opaque) {
                 if (requestedStop) break;
                 const uint64_t now = sceKernelGetProcessTime() / 1000u;
                 const bool streamOpen = stream.isOpen();
+                    workerStep(2);
+                    workerStep(3);
                     const bool options = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_START);
                     const bool circle = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_EAST);
                     const bool touchpad = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_TOUCHPAD);
@@ -815,6 +1069,7 @@ void* sessionWorker(void* opaque) {
                         if (!decoderResetHeldSince) decoderResetHeldSince = now;
                         if (!decoderResetLatched && now - decoderResetHeldSince >= 1000) {
                             decoderResetLatched = true;
+                            job->video->requestReset(xc::ps4::VideoResetRequestReason::UserMasterButton);
                             logLine("decoder_reset request=user_master_button chord=L3+R3 hold_ms=1000");
                         }
                     } else {
@@ -825,10 +1080,18 @@ void* sessionWorker(void* opaque) {
                         if (!optionsHeldSince) optionsHeldSince = now;
                         if (!settingsOpen && !settingsOpenLatched && now - optionsHeldSince >= 1000) {
                             settingsOpen = true;
+                            inputMuted.store(true, std::memory_order_release);
                             settingsOpenLatched = true;
                             settingsRow = 0;
+                            settingsOriginal = streamProfile;
                             draftTier = streamProfile.tier;
                             draftBitrate = streamProfile.maxBitrate;
+                            draftFps = streamProfile.frameRate;
+                            draftAutoReset = streamProfile.automaticVideoReset;
+                            draftUpscaler = streamProfile.upscaler;
+                            draftFrameWait = streamProfile.frameWait;
+                            draftRcasSharpness = streamProfile.rcasSharpness;
+                            fsrSettingsOpen = false;
                             nextSettingsRepeatAt = 0;
                             {
                                 std::lock_guard<std::mutex> lock(state.mutex);
@@ -836,6 +1099,12 @@ void* sessionWorker(void* opaque) {
                                 state.streamSettingsRow = settingsRow;
                                 state.streamDraftTier = draftTier;
                                 state.streamDraftBitrate = draftBitrate;
+                                state.streamDraftFrameRate = draftFps;
+                                state.streamDraftAutoReset = draftAutoReset;
+                                state.streamDraftUpscaler = draftUpscaler;
+                                state.streamFsrSettingsOpen = false;
+                                state.streamDraftRcasSharpness = draftRcasSharpness;
+                            state.streamDraftFrameWait = draftFrameWait;
                                 ++state.generation;
                             }
                             logLine("stream_settings action=open hold_ms=1000 tier=%s bitrate_cap=%u controls=dpad_cross_circle",
@@ -848,12 +1117,42 @@ void* sessionWorker(void* opaque) {
 
                     const bool wasSettingsOpen = settingsOpen;
                     const bool cross = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_SOUTH);
+                    const bool triangle = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_NORTH);
                     const bool dpadUp = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_DPAD_UP);
                     const bool dpadDown = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
                     const bool dpadLeft = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
                     const bool dpadRight = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
                     if (settingsOpen) {
+                        auto updateLiveSettings = [&](const StreamProfile& value) {
+                            if (streamProfile.tier != value.tier)
+                                pendingResolution.store(value.tier == "1080" ? 1080 : 720);
+                            if (streamProfile.maxBitrate != value.maxBitrate)
+                                stream.setMaximumBitrate(value.maxBitrate);
+                            streamProfile = value;
+                            std::lock_guard<std::mutex> lock(state.mutex);
+                            state.streamFrameRate = value.frameRate;
+                            state.streamAutoReset = value.automaticVideoReset;
+                            state.streamUpscaler = value.upscaler;
+                            state.streamRcasSharpness = value.rcasSharpness;
+                            state.streamFrameWait = value.frameWait;
+                            state.streamTier = value.tier;
+                            state.streamBitrateCap = value.maxBitrate;
+                            ++state.generation;
+                        };
+                            fsrSettingsOpen = !fsrSettingsOpen;
+                            std::lock_guard<std::mutex> lock(state.mutex);
+                            state.streamFsrSettingsOpen = fsrSettingsOpen;
+                            ++state.generation;
+                            logLine("stream_settings action=%s submenu=fsr rcas_sharpness_level=%u", fsrSettingsOpen ? "open" : "close", draftRcasSharpness);
+                        } else if (fsrSettingsOpen && circle && !previousCircle) {
+                            fsrSettingsOpen = false;
+                            std::lock_guard<std::mutex> lock(state.mutex);
+                            state.streamFsrSettingsOpen = false;
+                            ++state.generation;
+                        } else if (circle && !previousCircle) {
+                            updateLiveSettings(settingsOriginal);
                             settingsOpen = false;
+                            inputMuted.store(false, std::memory_order_release);
                             {
                                 std::lock_guard<std::mutex> lock(state.mutex);
                                 state.streamSettingsOpen = false;
@@ -862,19 +1161,40 @@ void* sessionWorker(void* opaque) {
                             logLine("stream_settings action=cancel tier=%s bitrate_cap=%u",
                                     tierLabel(streamProfile.tier), streamProfile.maxBitrate);
                         } else if (cross && !previousCross) {
+                            const bool resolutionChanged = streamProfile.tier != draftTier;
                             streamProfile.tier = draftTier;
                             streamProfile.maxBitrate = draftBitrate;
+                            streamProfile.frameRate = draftFps;
+                            streamProfile.automaticVideoReset = draftAutoReset;
+                            streamProfile.upscaler = draftUpscaler;
+                            streamProfile.frameWait = draftFrameWait;
+                            streamProfile.rcasSharpness = draftRcasSharpness;
+                            logLine("stream_fps local_target=%u server_sdp_applies=next_session received_60fps_must_still_decode_all_references=1", draftFps);
+                            if (resolutionChanged)
+                                pendingResolution.store(streamProfile.tier == "1080" ? 1080 : 720);
                             stream.setMaximumBitrate(streamProfile.maxBitrate);
                             profileToSave = streamProfile;
                             pressureWindows = 0;
+                            queueProfileWrite(profileToSave);
                             {
                                 std::lock_guard<std::mutex> lock(state.mutex);
+                                state.streamFrameRate = streamProfile.frameRate;
+                                state.streamAutoReset = streamProfile.automaticVideoReset;
+                                state.streamUpscaler = streamProfile.upscaler;
+                                state.streamRcasSharpness = streamProfile.rcasSharpness;
+                state.streamFrameWait = streamProfile.frameWait;
+                                state.streamFsrSettingsOpen = false;
                                 state.streamTier = streamProfile.tier;
                                 state.streamBitrateCap = streamProfile.maxBitrate;
                                 state.streamSettingsOpen = false;
                                 ++state.generation;
                             }
                             settingsOpen = false;
+                            inputMuted.store(false, std::memory_order_release);
+                                    tierLabel(streamProfile.tier), streamProfile.maxBitrate,
+                            else if (settingsRow == 2) draftFps = draftFps == 60 ? 30 : 60;
+                            else if (settingsRow == 3) draftAutoReset = !draftAutoReset;
+                            else if (settingsRow == 5) draftFrameWait = draftFrameWait ? 0 : 1;
                             else if (settingsRow == 0) draftTier = draftTier == "720" ? "1080" : "720";
                                 size_t index = 0;
                                 while (index + 1 < kSelectableBitrates.size() &&
@@ -883,21 +1203,40 @@ void* sessionWorker(void* opaque) {
                                 else index = (index + 1) % kSelectableBitrates.size();
                                 draftBitrate = kSelectableBitrates[index];
                             }
+                            if (!fsrSettingsOpen && (dpadLeft || dpadRight)) {
+                                StreamProfile preview = streamProfile;
+                                preview.tier = draftTier;
+                                preview.maxBitrate = draftBitrate;
+                                preview.frameRate = draftFps;
+                                preview.automaticVideoReset = draftAutoReset;
+                                preview.frameWait = draftFrameWait;
+                                preview.upscaler = draftUpscaler;
+                                updateLiveSettings(preview);
+                                    settingsRow, tierLabel(draftTier), draftBitrate, draftFps,
+                            }
                             nextSettingsRepeatAt = now + 220;
                             std::lock_guard<std::mutex> lock(state.mutex);
                             state.streamSettingsRow = settingsRow;
                             state.streamDraftTier = draftTier;
                             state.streamDraftBitrate = draftBitrate;
+                            state.streamDraftFrameRate = draftFps;
+                            state.streamDraftAutoReset = draftAutoReset;
+                            state.streamDraftUpscaler = draftUpscaler;
+                            state.streamDraftRcasSharpness = draftRcasSharpness;
+                            state.streamDraftFrameWait = draftFrameWait;
+                            state.streamFsrSettingsOpen = fsrSettingsOpen;
                             ++state.generation;
                         }
                     }
 
                     if (touchpad && !previousTouchpad) {
                         xboxGuideUntil = now + 250;
+                        guidePulseUntil.store(xboxGuideUntil, std::memory_order_release);
                     }
                     previousTouchpad = touchpad;
                     previousCircle = circle;
                     previousCross = cross;
+                    previousTriangle = triangle;
                     xc::stream::GamepadFrame gamepad = job->controller
                         ? readStreamGamepad(*job->controller) : xc::stream::GamepadFrame{};
                     if (settingsOpen || wasSettingsOpen) gamepad = {};
@@ -909,6 +1248,8 @@ void* sessionWorker(void* opaque) {
                                                  axisBucket(gamepad.rightY) != axisBucket(lastGamepad.rightY) ||
                                                  axisBucket(gamepad.leftTrigger) != axisBucket(lastGamepad.leftTrigger) ||
                                                  axisBucket(gamepad.rightTrigger) != axisBucket(lastGamepad.rightTrigger);
+                        if (firstGamepadReport || gamepad.buttons != lastGamepad.buttons || axesChanged) {
+                            logLine("GAMEPAD state queued buttons=0x%04x left=(%.2f,%.2f) right=(%.2f,%.2f) triggers=(%.2f,%.2f)",
                                     gamepad.buttons, gamepad.leftX, gamepad.leftY,
                                     gamepad.rightX, gamepad.rightY,
                                     gamepad.leftTrigger, gamepad.rightTrigger);
@@ -934,13 +1275,18 @@ void* sessionWorker(void* opaque) {
                     continue;
                 }
                 if (job->video->takeKeyframeRequest()) {
+                    pendingKeyframe.store(true);
                     logLine("video recovery action=request_keyframe reason=decoder_reset");
                 }
                 if (now >= nextPerformanceCheckAt) {
                     nextPerformanceCheckAt = now + 250;
+                    workerStep(6);
                     const auto performance = job->video->performanceSnapshot();
+                    if (performance.lastOutputAgeMs > 750 && performance.lastInputAgeMs > 250)
+                        pendingKeyframe.store(true);
                     if (now >= nextVideoFlowLogAt) {
                         nextVideoFlowLogAt = now + 2000;
+                        logLine("video_flow received=%llu accepted=%llu dequeued=%llu queued=%u decoded=%llu published=%llu errors=%llu empty=%llu dropped=%llu catchup_dropped=%llu input_age_ms=%llu output_age_ms=%llu cpu=%d,%d,%d,%d,%d",
                             static_cast<unsigned long long>(performance.receivedAccessUnits),
                             static_cast<unsigned long long>(performance.acceptedAccessUnits),
                             static_cast<unsigned long long>(performance.dequeuedAccessUnits), performance.queuedAccessUnits,
@@ -949,20 +1295,36 @@ void* sessionWorker(void* opaque) {
                             static_cast<unsigned long long>(performance.failedAccessUnits),
                             static_cast<unsigned long long>(performance.emptyOutputs),
                             static_cast<unsigned long long>(performance.droppedAccessUnits),
+                            static_cast<unsigned long long>(performance.catchupDroppedAccessUnits),
                             static_cast<unsigned long long>(performance.lastInputAgeMs),
                             static_cast<unsigned long long>(performance.lastOutputAgeMs), performance.decoderCpu,
                             performance.conversionCallerCpu, performance.converterCpus[0],
                             performance.converterCpus[1], performance.converterCpus[2]);
+                        logLine("video_playout queued=%u uploaded=%llu decoded_replaced=%llu underflow=%llu prime_waits=%llu last_uploaded_sequence=%llu policy=latest_decoded_no_prefill",
+                            performance.playoutDepth, static_cast<unsigned long long>(performance.playoutUploaded),
+                            static_cast<unsigned long long>(performance.playoutReplaced),
+                            static_cast<unsigned long long>(performance.playoutRepeated),
+                            static_cast<unsigned long long>(performance.playoutPrimeWaits),
+                            static_cast<unsigned long long>(performance.playoutSequence));
+                        const uint64_t unsafeDrops = performance.droppedAccessUnits >= performance.catchupDroppedAccessUnits
+                            ? performance.droppedAccessUnits - performance.catchupDroppedAccessUnits : 0;
+                        if (unsafeDrops > lastVideoDrops) {
+                            pendingKeyframe.store(true);
                             logLine("video recovery action=request_keyframe reason=decoder_input_queue_drop");
                         }
+                        lastVideoDrops = unsafeDrops;
                     }
 
                     if (now >= nextHudStatsAt) {
                         nextHudStatsAt = now + 1000;
                         const auto& network = stream.videoStats();
+                        const int rttMs = cachedRtt.load();
                         {
                             std::lock_guard<std::mutex> lock(state.mutex);
+                            state.streamFrameRate = streamProfile.frameRate;
+                state.streamTier = streamProfile.tier;
                             state.streamBitrateCap = streamProfile.maxBitrate;
+                            state.streamRembEstimate = network.rembLastRequestedBitrate.load();
                             state.streamReceiveRate = network.receiveRate.load();
                             state.streamRttMs = rttMs;
                             state.streamWidth = performance.width;
@@ -977,17 +1339,30 @@ void* sessionWorker(void* opaque) {
                             state.streamConvertAvgUs = performance.convertAvgUs;
                             ++state.streamStatsGeneration;
                         }
+                        const uint64_t steadyNowMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count());
+                        const uint64_t lastRembAtMs = network.rembLastRequestAtMs.load();
+                        const uint64_t rembAgeMs = lastRembAtMs && steadyNowMs >= lastRembAtMs
+                            ? steadyNowMs - lastRembAtMs : 0;
+                        logLine("stream_metrics requested_tier=%s actual=%ux%u decoded_fps=%u published_fps=%u scaler=%s aspect=fit queue=%u peak=%u queue_wait_avg_ms=%.3f queue_wait_max_ms=%.3f decode_ms=%.3f convert_ms=%.3f rtt_ms=%d rtp_receive_mbps=%.2f remb_requested_mbps=%.2f remb_cap_mbps=%.2f remb_packets_requested=%llu remb_last_age_ms=%llu receive_above_cap_samples=%llu loss=%llu recovered=%llu",
                             tierLabel(streamProfile.tier), performance.width, performance.height,
                             performance.decodedFps, performance.publishedFps,
                             performance.queuedAccessUnits, performance.maxQueueDepth,
                             performance.queueWaitAvgUs / 1000.0, performance.queueWaitMaxUs / 1000.0,
                             performance.decodeAvgUs / 1000.0, performance.convertAvgUs / 1000.0,
                             rttMs, network.receiveRate.load() / 1000000.0,
+                            network.rembLastRequestedBitrate.load() / 1000000.0,
+                            streamProfile.maxBitrate / 1000000.0,
+                            static_cast<unsigned long long>(network.rembReportsRequested.load()),
+                            static_cast<unsigned long long>(rembAgeMs),
+                            static_cast<unsigned long long>(network.receiveRateAboveCapSamples.load()),
                             static_cast<unsigned long long>(network.lost.load()),
                             static_cast<unsigned long long>(network.recovered.load()));
                     }
 
                     if (performance.generation == lastPerformanceGeneration) {
+                        workerStep(7);
+                sceKernelUsleep(4000);
                         continue;
                     }
                     lastPerformanceGeneration = performance.generation;
@@ -1010,6 +1385,7 @@ void* sessionWorker(void* opaque) {
                             performance.converterCpus[1], performance.converterCpus[2],
                             static_cast<unsigned long long>(network.lost.load()),
                             static_cast<unsigned long long>(network.recovered.load()),
+                            network.estimate.load(), network.receiveRate.load(), cachedRtt.load());
 
                     pressureWindows = pressure ? pressureWindows + 1 : 0;
                     if (pressure) {
@@ -1026,7 +1402,16 @@ void* sessionWorker(void* opaque) {
                 }
                 sceKernelUsleep(4000);
             }
+            stopInputPoll.store(true, std::memory_order_release);
+            stopGamepadSender.store(true, std::memory_order_release);
+            sendStateChanged.notify_all();
+            maintenanceStop.store(true);
             stream.close();
+            if (maintenance.joinable()) maintenance.join();
+            if (gamepadSender.joinable()) gamepadSender.join();
+            stopGamepadMetrics.store(true);
+            if (gamepadMetrics.joinable()) gamepadMetrics.join();
+            if (inputPoller.joinable()) inputPoller.join();
             if (performanceWindows != 0) saveStreamProfile(profileToSave);
             job->video->stop();
             job->gssv->stopSession();
@@ -1181,6 +1566,11 @@ struct DrawContext {
     uint64_t lastHudPerformanceGeneration = UINT64_MAX;
     uint64_t lastPresentationGeneration = UINT64_MAX;
     uint64_t lastStreamStatsGeneration = UINT64_MAX;
+    uint64_t lastFreezeDiagPresentationGeneration = UINT64_MAX;
+    uint64_t repeatEpisodeSequence = 0;
+    uint64_t repeatEpisodeStartedAtMs = 0;
+    bool repeatEpisodeActive = false;
+    bool noUploadEpisodeActive = false;
     bool lastHudTransportLost = false;
     std::chrono::steady_clock::time_point canvasCopyWindowStartedAt{};
     uint64_t canvasCopySumUs = 0;
@@ -1200,6 +1590,7 @@ struct DrawContext {
     } up, down, left, right, dpadLeft, dpadRight;
     bool ps5UiReady = false;
     bool ps5UiLoading = false;
+    xc::ps4::VideoRepeatWatchdog repeatWatchdog;
 };
 
 xc::stream::GamepadFrame readStreamGamepad(const Controller& controller) {
@@ -1490,6 +1881,7 @@ size_t jumpToAdjacentInitial(const std::vector<xc::xcloud::Title>& titles, size_
 
 bool beginCloudSession(LoginState& state, const xc::ui::GameTile& game,
                       xc::ps4::VideoDecoder* video, Controller* controller) {
+    std::unique_lock<std::mutex> lock(state.mutex);
     if (state.stage != LoginStage::Library || !state.gssv || state.refreshToken.empty() || game.titleId.empty())
         return false;
     auto* job = new SessionJob{&state, state.gssv, game.titleId, state.refreshToken, game.name, video, controller};
@@ -1502,6 +1894,19 @@ bool beginCloudSession(LoginState& state, const xc::ui::GameTile& game,
         }
     }
     ++state.generation;
+    lock.unlock();
+    const bool backgroundReleased = xc::net::pauseBackgroundHttp(true);
+    if (!backgroundReleased) {
+        lock.lock();
+        state.stage = LoginStage::Library;
+        state.error = "Background catalog/artwork HTTP did not release the shared HTTP context.";
+        ++state.generation;
+        lock.unlock();
+        xc::net::pauseBackgroundHttp(false);
+        delete job;
+        logLine("cloud session blocked reason=background_http_lease_timeout");
+        return false;
+    }
     pthread_t worker{};
     const int rc = pthread_create(&worker, nullptr, sessionWorker, job);
     if (rc == 0) {
@@ -1510,22 +1915,59 @@ bool beginCloudSession(LoginState& state, const xc::ui::GameTile& game,
         return true;
     }
     delete job;
+    lock.lock();
     state.stage = LoginStage::Library;
     state.error = "Could not start the cloud session worker.";
     ++state.generation;
+    lock.unlock();
+    xc::net::pauseBackgroundHttp(false);
     logLine("cloud session worker failed pthread_create=%d", rc);
     return false;
 }
 
 xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
+                                               const xc::ps4::PresentationStats& presentation,
+                                               bool gpuVideoEnabled) {
     auto& context = *static_cast<DrawContext*>(opaque);
+    if (context.video) context.video->setGpuVideoEnabled(gpuVideoEnabled);
+    {
+        std::lock_guard<std::mutex> lock(context.state->mutex);
+        context.state->gpuVideoActive = gpuVideoEnabled;
+    }
     const uint64_t now = sceKernelGetProcessTime() / 1000u;
+    static bool settingsWasOpen = false;
+    static bool fsrWasOpen = false;
+    static uint64_t settingsAnimAt = 0;
+    static uint64_t pageAnimAt = 0;
+    if (state.streamSettingsOpen != settingsWasOpen) {
+        settingsWasOpen = state.streamSettingsOpen;
+        settingsAnimAt = now;
+    }
+    if (state.streamFsrSettingsOpen != fsrWasOpen) {
+        fsrWasOpen = state.streamFsrSettingsOpen;
+        pageAnimAt = now;
+    }
+    const auto animProgress = [now](uint64_t start) {
+    };
+    const float settingsEase = animProgress(settingsAnimAt);
+    const bool settingsShouldDraw = state.streamSettingsOpen ||
+        (!state.streamSettingsOpen && settingsAnimationActive && settingsAnimAt != 0);
+    const float settingsVisibility = state.streamSettingsOpen ? settingsEase : 1.0f - settingsEase;
+    const float pageEase = animProgress(pageAnimAt);
+    const float settingsPageProgress = pageAnimationActive
+        ? (state.streamFsrSettingsOpen ? pageEase : 1.0f - pageEase)
+        : (state.streamFsrSettingsOpen ? 1.0f : 0.0f);
     if (state.stage != LoginStage::Streaming) {
         context.controller->pump();
     }
     const auto nav = state.stage == LoginStage::Streaming
         ? xc::ui::NavInput{} : readNavInput(context, now);
 
+    context.canvas->enableGpuUi(gpuVideoEnabled && state.stage == LoginStage::Streaming &&
+                                context.video && context.video->hasFrame());
+    if (context.video) { context.video->setPresentationFps(state.streamFrameRate); context.video->setPlayoutDelayFrames(state.streamFrameWait); }
+    const bool enteringStream = context.previousStage != LoginStage::Streaming &&
+                                state.stage == LoginStage::Streaming;
         context.ps5Ui->showHome();
         context.ps5Ui->showTab(xc::ui::Tab::Library);
         context.ps5Ui->invalidate();
@@ -1534,7 +1976,80 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
     context.previousStage = state.stage;
 
     if (state.stage == LoginStage::Streaming) {
+        if (context.video && presentation.generation != context.lastFreezeDiagPresentationGeneration) {
+            context.lastFreezeDiagPresentationGeneration = presentation.generation;
+            const auto video = context.video->performanceSnapshot();
+            if (presentation.scanoutValid && presentation.newVideoFps == 0 && video.lastOutputAgeMs >= 750) {
+                if (!context.noUploadEpisodeActive) {
+                    context.noUploadEpisodeActive = true;
+                    logLine("video_freeze_diagnosis event=no_new_video_upload scanout_fps=%u uploaded_video_fps=%u input_age_ms=%llu output_age_ms=%llu received_aus=%llu decoded_total=%llu published_total=%llu queue=%u playout_depth=%u rtp_receive_mbps=%.3f remb_advertised_mbps=%.3f remb_cap_mbps=%.3f rtt_ms=%d action=observe_no_decoder_reset",
+                        presentation.scanoutFps, presentation.newVideoFps,
+                        static_cast<unsigned long long>(video.lastInputAgeMs),
+                        static_cast<unsigned long long>(video.lastOutputAgeMs),
+                        static_cast<unsigned long long>(video.receivedAccessUnits),
+                        static_cast<unsigned long long>(video.totalDecoded),
+                        static_cast<unsigned long long>(video.totalPublished), video.queuedAccessUnits,
+                        video.playoutDepth, state.streamReceiveRate / 1000000.0,
+                        state.streamRembEstimate / 1000000.0, state.streamBitrateCap / 1000000.0,
+                        state.streamRttMs);
+                }
+            } else if (context.noUploadEpisodeActive &&
+                       (presentation.newVideoFps > 0 || video.lastOutputAgeMs < 400)) {
+                context.noUploadEpisodeActive = false;
+                logLine("video_freeze_diagnosis event=new_video_upload_resumed output_age_ms=%llu uploaded_video_fps=%u confirmed_unique_video_frames=%llu",
+                    static_cast<unsigned long long>(video.lastOutputAgeMs), presentation.newVideoFps,
+                    static_cast<unsigned long long>(presentation.confirmedUniqueVideoFrames));
+            }
+        }
+        if (presentation.confirmedVideoKnown && presentation.repeatedVideoFlips >= 6) {
+            if (!context.repeatEpisodeActive || context.repeatEpisodeSequence != presentation.confirmedVideoSequence) {
+                context.repeatEpisodeActive = true;
+                context.repeatEpisodeSequence = presentation.confirmedVideoSequence;
+                context.repeatEpisodeStartedAtMs = now;
+                const auto video = context.video ? context.video->performanceSnapshot() : xc::ps4::VideoPerformanceSnapshot{};
+                logLine("video_freeze_diagnosis event=confirmed_frame_repeat sequence=%llu same_frame_flips=%u scanout_fps=%u uploaded_video_fps=%u input_age_ms=%llu output_age_ms=%llu received_aus=%llu decoded_total=%llu published_total=%llu queue=%u playout_depth=%u unique_scanout_frames=%llu repeated_scanouts_total=%llu rtp_receive_mbps=%.3f remb_advertised_mbps=%.3f remb_cap_mbps=%.3f rtt_ms=%d action=observe_no_decoder_reset",
+                    static_cast<unsigned long long>(presentation.confirmedVideoSequence), presentation.repeatedVideoFlips,
+                    presentation.scanoutFps, presentation.newVideoFps,
+                    static_cast<unsigned long long>(video.lastInputAgeMs),
+                    static_cast<unsigned long long>(video.lastOutputAgeMs),
+                    static_cast<unsigned long long>(video.receivedAccessUnits),
+                    static_cast<unsigned long long>(video.totalDecoded),
+                    static_cast<unsigned long long>(video.totalPublished), video.queuedAccessUnits,
+                    video.playoutDepth, static_cast<unsigned long long>(presentation.confirmedUniqueVideoFrames),
+                    static_cast<unsigned long long>(presentation.confirmedRepeatedVideoFlips),
+                    state.streamReceiveRate / 1000000.0, state.streamRembEstimate / 1000000.0,
+                    state.streamBitrateCap / 1000000.0, state.streamRttMs);
+            }
+        } else if (context.repeatEpisodeActive && presentation.confirmedVideoKnown &&
+                   presentation.confirmedVideoSequence != context.repeatEpisodeSequence) {
+            logLine("video_freeze_diagnosis event=confirmed_frame_changed previous_sequence=%llu next_sequence=%llu observed_repeat_ms=%llu unique_scanout_frames=%llu repeated_scanouts_total=%llu",
+                static_cast<unsigned long long>(context.repeatEpisodeSequence),
+                static_cast<unsigned long long>(presentation.confirmedVideoSequence),
+                static_cast<unsigned long long>(now - context.repeatEpisodeStartedAtMs),
+                static_cast<unsigned long long>(presentation.confirmedUniqueVideoFrames),
+                static_cast<unsigned long long>(presentation.confirmedRepeatedVideoFlips));
+            context.repeatEpisodeActive = false;
+        }
+        const auto resetDecision = context.repeatWatchdog.evaluate(state.streamAutoReset,
+                presentation.confirmedVideoKnown, presentation.confirmedVideoSequence,
+                presentation.repeatedVideoFlips, state.streamFrameRate, state.streamNewVideoFps, now);
+        if (context.video && resetDecision.reset) {
+            context.video->requestReset(xc::ps4::VideoResetRequestReason::AdaptiveWatchdog);
+            logLine("repeat_watchdog mode=adaptive enabled=1 confirmed_sequence=%llu same_video_flips=%u threshold=%u stalled_ms=%llu score=%.3f decoded_fps=%u action=request_decoder_reset_wait_idr cooldown_ms=2000 once_per_stuck_sequence=1",
+                    static_cast<unsigned long long>(presentation.confirmedVideoSequence), presentation.repeatedVideoFlips,
+                    resetDecision.threshold, static_cast<unsigned long long>(resetDecision.stalledMs),
+                    resetDecision.score, state.streamNewVideoFps);
+        }
+        const uint64_t stepAt = context.state->streamWorkerStepAtMs.load(std::memory_order_relaxed);
+        const uint32_t step = context.state->streamWorkerStep.load(std::memory_order_acquire);
+        const uint64_t stepAge = stepAt && now >= stepAt ? now - stepAt : 0;
+        static const char* stepNames[] = {"idle", "state_lock", "pad_pump", "input", "gamepad_send", "stream_tick_keepalive", "performance", "sleep"};
+        if (presentation.generation != context.lastPresentationGeneration)
+            logLine("stream_worker step=%s age_ms=%llu stalled=%u",
+                    step < 8 ? stepNames[step] : "unknown", static_cast<unsigned long long>(stepAge), stepAge > 1000 ? 1u : 0u);
+        if (gpuVideoEnabled && enteringStream) context.canvas->clearTransparent();
         const auto copyStart = std::chrono::steady_clock::now();
+        const bool newFrame = !gpuVideoEnabled && context.video && context.video->copyLatestToCanvas(
         const uint32_t copyUs = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - copyStart).count());
         const auto nowSteady = std::chrono::steady_clock::now();
@@ -1560,17 +2075,25 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
         }
         if (context.video && context.video->hasFrame()) {
             const auto performance = context.video->performanceSnapshot();
+            const bool videoStalled = performance.lastOutputAgeMs > 750;
                                     state.generation != context.lastGeneration ||
+            if (gpuVideoEnabled) context.canvas->clearTransparent();
             char title[128];
             std::snprintf(title, sizeof(title), "%s  |  requested %s  |  %s",
                 tierLabel(state.streamTier),
                 performance.width ? "VIDEO ACTIVE" : "VIDEO STARTING");
             char stats[192];
+            // Show measured rates without clamping; bursts can exceed 60 in a short window.
+            std::snprintf(stats, sizeof(stats), "Decode %u/s | Published %u/s | Uploaded %u/s | Unique scanout %u/s | Flips %u/s",
+                state.streamNewVideoFps, state.streamPublishedFps, presentation.newVideoFps,
+                presentation.confirmedUniqueVideoFps, presentation.scanoutFps);
             char detail[192];
             char rtt[32];
             if (state.streamRttMs >= 0) std::snprintf(rtt, sizeof(rtt), "%d ms", state.streamRttMs);
             else std::snprintf(rtt, sizeof(rtt), "unknown");
+            std::snprintf(detail, sizeof(detail), "Received %.2f Mbps | REMB requested %.2f Mbps | Cap %.0f Mbps | RTT %s",
                 state.streamReceiveRate / 1000000.0, state.streamRembEstimate / 1000000.0,
+                state.streamBitrateCap / 1000000.0, rtt);
             char pipeline[224];
             std::snprintf(pipeline, sizeof(pipeline), "Queue %u / peak %u   Queue wait %.2f / %.2f ms   Decode %.2f ms   Convert %.2f ms",
                 state.streamQueueDepth, state.streamQueuePeak,
@@ -1583,8 +2106,12 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
                 presentation.uploadAvgUs / 1000.0, presentation.acquireAvgUs / 1000.0,
                 presentation.encodeSubmitAvgUs / 1000.0);
             char waitLine[192];
+            std::snprintf(waitLine, sizeof(waitLine), "VideoOut flips %s%u/s (includes repeats)   Cadence %.2f / %.2f ms avg/max",
+                presentation.scanoutValid ? "" : "unavailable ", presentation.scanoutFps,
                 presentation.frameIntervalAvgUs / 1000.0, presentation.frameIntervalMaxUs / 1000.0);
             char cpu[192];
+            std::snprintf(cpu, sizeof(cpu), "Session worker: %s age %llu ms | decoder CPU %d | input warning above 1000 ms",
+                step < 8 ? stepNames[step] : "unknown", static_cast<unsigned long long>(stepAge), performance.decoderCpu);
             const char* controls = state.streamTransportLost
             context.lastHudPerformanceGeneration = performance.generation;
             context.lastPresentationGeneration = presentation.generation;
@@ -1648,6 +2175,14 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
             state.verificationUriComplete.empty() ? "unavailable" : "ready");
     return {true, false};
 }
+
+bool uploadLatestNv12(void* opaque, uint8_t* destination, size_t capacity,
+    auto& context = *static_cast<DrawContext*>(opaque);
+    uint32_t frameWidth = 0, frameHeight = 0;
+    *width = frameWidth;
+    *height = frameHeight;
+    return true;
+}
 }
 
 int main() {
@@ -1659,6 +2194,9 @@ int main() {
     }
     if (::stat(kLogDirectory, &logDirectoryStat) == 0 && S_ISDIR(logDirectoryStat.st_mode)) {
         xc::log::setFile(kAppLogPath);
+        const bool async = xc::log::startAsync([](const char* line) { sceKernelDebugOutText(0, line); });
+        if (!async) sceKernelDebugOutText(0, "async diagnostic logger creation failed; synchronous fallback active\n");
+
     } else {
         sceKernelDebugOutText(0, "log directory /data/PSBOX is unavailable\n");
     }
@@ -1710,4 +2248,6 @@ int main() {
     drawLoginScreen(canvas, fonts, initialState);
     draw.lastGeneration = initialState.generation;
     logLine("canvas ready 1920x1080 RGBA; entering Mesa Orbis WSI/VideoOut");
+    xc::ps4::presentCanvas(canvas.data(), canvas.width(), canvas.height(), refreshCanvas,
+                           uploadLatestNv12, &draw);
 }

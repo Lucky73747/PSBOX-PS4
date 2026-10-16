@@ -1,7 +1,15 @@
 /build-*/
 /dependencies/
+/dist/
+/logs/
+*.pkg
 *.log
 *.ppm
 *.aus
 *.h264
+*.vdp
+account.json
+msa_refresh_token.txt
 autoplay.txt
+.env
+.env.*

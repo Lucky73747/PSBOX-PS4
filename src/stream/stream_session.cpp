@@ -78,9 +78,13 @@ void resetSctpFlowTrace() {
     gSctpCommUpSeen = false;
     gPeerConnectionSctpCallbackSeen = false;
 
+
 }
 
 void appendSctpFlowSnapshot(const char* reason) {
+    XC_LOGI("transport_snapshot reason=%s sctp_comm_up=%u sctp_callback=%u",
+            reason ? reason : "unknown", gSctpCommUpSeen.load() ? 1u : 0u,
+            gPeerConnectionSctpCallbackSeen.load() ? 1u : 0u);
 }
 
 void logIceDiagnostic(const char* message) {
@@ -104,9 +108,13 @@ void logIceDiagnostic(const char* message) {
     if (message && std::strstr(message, "ICE_DIAG sockaddr "))
         return;
 
+    if (message && !std::strstr(message, "FAIL") && !std::strstr(message, "TIMEOUT") && (std::strstr(message, "event=stun_send") || std::strstr(message, "event=consent") ||
+        std::strstr(message, "event=keepalive") || std::strstr(message, "event=datagram_summary") || std::strstr(message, "event=srtp_packet_summary") ||
+        std::strstr(message, "event=sctp_packet") || std::strstr(message, "event=usrsctp_conninput"))) return;
     char line[1536];
     std::snprintf(line, sizeof(line), "[%s] ICE_DIAG t_ms=%.1f %s\n",
                   kBuildLabel, clockMs(), message ? message : "(null)");
+    XC_LOGI("%s", line);
 #else
     XC_LOGW("ICE_DIAG %s", message ? message : "(null)");
 #endif
@@ -137,6 +145,7 @@ std::vector<std::string> midsInOrder(const std::string& sdp) {
 // a=imageattr after every a=fmtp line: the largest picture we accept. The
 // xbox.com client adds "recv [x=[0:1920],y=[0:1080],fps=[0:60]]" to limit
 // devices that can't do 1440p; announcing 2560x1440 is what allows 1440p.
+std::string advertiseReceiveSize(const std::string& sdp, int w, int h, uint32_t fps) {
     if (sdp.find("a=imageattr") != std::string::npos) return sdp;
     std::string out;
     size_t pos = 0;
@@ -148,6 +157,7 @@ std::vector<std::string> midsInOrder(const std::string& sdp) {
         if (line.rfind("a=fmtp:", 0) == 0 && line.find("profile-level-id") != std::string::npos) {
             std::string pt = line.substr(7, line.find(' ') - 7);
             out += "a=imageattr:" + pt + " recv [x=[0:" + std::to_string(w) + "],y=[0:" + std::to_string(h) +
+                   "],fps=[0:" + std::to_string(fps == 30 ? 30 : 60) + "]]\r\n";
         }
         pos = eol + 1;
     }
@@ -207,6 +217,7 @@ struct StreamSession::Impl {
     std::atomic<bool> firstVideoTimeoutLogged{false};
     std::atomic<uint64_t> streamReadyAtMs{0};
     std::atomic<uint32_t> inputSequence{1};
+    std::atomic<bool> keyframeRequested{false};
     uint64_t lastKeepaliveMs = 0;
     VideoReceiveStats videoStats;
     std::shared_ptr<RtcpReporter> videoReporter;
@@ -661,6 +672,9 @@ struct StreamSession::Impl {
         auto videoReceiver = std::make_shared<H264Receiver>(
             [this] {
                 if (!open) return;
+                // The receiving callback must never block on the SCTP send
+                // mutex held by a simultaneous controller send.
+                keyframeRequested.store(true, std::memory_order_release);
             },
             videoStats);
         videoReceiver->setSimulatedLoss(opt.simulatedVideoLoss);
@@ -768,8 +782,14 @@ struct StreamSession::Impl {
         }
         std::string offer = std::string(*local);
         reportProgress("WebRTC 4/8: local offer ready; contacting cloud signaling");
+        if (opt.resolutionAlias == "1440") offer = advertiseReceiveSize(offer, 2560, 1440, opt.maxFrameRate);
 #if defined(__ORBIS__)
         if (opt.resolutionAlias == "720" || opt.resolutionAlias == "720HQ")
+            offer = advertiseReceiveSize(offer, 1280, 720, opt.maxFrameRate);
+        else if (opt.resolutionAlias == "1080")
+            offer = advertiseReceiveSize(offer, 1920, 1080, opt.maxFrameRate);
+        XC_LOGI("receive preference resolution=%s max_fps=%u applies=SDP server_acceptance=unconfirmed",
+                opt.resolutionAlias.c_str(), opt.maxFrameRate == 30 ? 30u : 60u);
 #endif
         XC_LOGD("local offer:\n%s", offer.c_str());
         if (!gssv.sendSdpOffer(offer, err)) return false;
@@ -938,6 +958,14 @@ struct StreamSession::Impl {
     }
 
     void requestKeyframe() {
+#if defined(__ORBIS__)
+        // Recovery must remain available when the input/control SCTP path is
+        // congested. PLI goes over SRTCP and does not enter usrsctp's locks.
+        const uint64_t now = platform::nowMs();
+        if (video && video->requestKeyframe()) {
+            XC_LOGI("video_recovery keyframe_path=rtcp_pli");
+        }
+#endif
         json::Value v = json::Value::object();
         v.set("message", "videoKeyframeRequested");
         v.set("ifrRequested", true);
@@ -953,6 +981,12 @@ struct StreamSession::Impl {
             std::string err;
             if (!gssv.keepalive(err)) XC_LOGW("%s", err.c_str());
         }
+            lastRecoveryDiagnosticMs = now;
+                (unsigned long long)videoStats.framesOut.load(), (unsigned long long)videoStats.lastKeyframeAtMs.load(),
+                (unsigned long long)videoStats.bufferedPackets.load(), (unsigned long long)videoStats.missingPackets.load(),
+                videoStats.waitingKeyframe.load() ? 1u : 0u);
+        }
+            keyframeRequested.store(false, std::memory_order_release);
             lastKeyframeMs = now;
             requestKeyframe();
         }
@@ -994,6 +1028,18 @@ bool StreamSession::isOpen() const { return impl_->open; }
 
 bool StreamSession::sendGamepad(const GamepadFrame& frame) {
     if (!impl_->open) return false;
+    const auto& ch = impl_->input;
+    if (!ch || !ch->isOpen()) return false;
+    // Do not enqueue a chain of obsolete control samples behind congestion.
+    if (ch->bufferedAmount() != 0) return false;
+    try {
+        const auto packet = gamepadReport(impl_->inputSequence++, impl_->nowMs(), frame);
+        (void)ch->send(reinterpret_cast<const rtc::byte*>(packet.data()), packet.size());
+        return true; // immediate or queued once; transport acceptance, not remote acknowledgment
+    } catch (const std::exception& e) {
+        XC_LOGW("gamepad_send failed: %s", e.what());
+        return false;
+    }
 }
 
 void StreamSession::sendAudio(const uint8_t* opus, size_t size, uint32_t timestamp) {
@@ -1068,7 +1114,17 @@ int StreamSession::rttMs() const {
 
 const VideoReceiveStats& StreamSession::videoStats() const {
     if (impl_->videoReporter) {
+        const auto now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        const auto last = impl_->videoReporter->lastRtpAtMs();
+        const auto age = last && now >= last ? now - last : 0;
+        impl_->videoStats.lastRtpAgeMs = age;
+        impl_->videoStats.receiveRate = age > 1000 ? 0 : impl_->videoReporter->receiveRate();
         impl_->videoStats.estimate = impl_->videoReporter->estimate();
+        impl_->videoStats.rembReportsRequested = impl_->videoReporter->rembReportsRequested();
+        impl_->videoStats.rembLastRequestAtMs = impl_->videoReporter->rembLastRequestAtMs();
+        impl_->videoStats.rembLastRequestedBitrate = impl_->videoReporter->rembLastRequestedBitrate();
+        impl_->videoStats.receiveRateAboveCapSamples = impl_->videoReporter->receiveRateAboveCapSamples();
     }
     return impl_->videoStats;
 }

@@ -9,6 +9,10 @@ namespace xc::log {
 enum class Level { Debug, Info, Warn, Error };
 
 void setLevel(Level level);
+// Enable bounded background diagnostics before starting media workers.
+// Returns false if worker creation fails; synchronous logging remains available.
+bool startAsync(void (*debugSink)(const char*) = nullptr);
+void flush();
 // Also appends every line to this file (created if missing). nullptr disables.
 void setFile(const char* path);
 

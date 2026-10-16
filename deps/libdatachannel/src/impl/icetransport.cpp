@@ -11,6 +11,7 @@
 #include "internals.hpp"
 #include "transport.hpp"
 #include "utils.hpp"
+#include "processor.hpp"
 
 #include <algorithm>
 #include <iostream>
@@ -362,6 +363,40 @@ void IceTransport::RecvCallback(juice_agent_t *, const char *data, size_t size, 
 	try {
 		PLOG_VERBOSE << "Incoming size=" << size;
 		auto b = reinterpret_cast<const byte *>(data);
+#if defined(__ORBIS__) || defined(__PS4__)
+        // libjuice invokes this callback under its registry mutex. Deliver on
+        // a serial processor so RTCP/DTLS feedback never re-enters ICE while
+        // that mutex is held. Bound memory when the consumer is stalled.
+        static Processor receiver;
+        static std::atomic<unsigned> pending{0};
+        static std::atomic<uint64_t> dropped{0};
+        if (pending.fetch_add(1) >= 512) {
+            --pending;
+            const auto count = ++dropped;
+            if (count == 1 || count % 100 == 0) {
+                PLOG_WARNING << "ice_receive_overflow dropped=" << count << " pending_limit=512";
+            }
+            return;
+        }
+        const auto enqueued = std::chrono::steady_clock::now();
+        auto packet = make_message(b, b + size);
+        auto weak = iceTransport->weak_from_this();
+        receiver.enqueue([weak, packet, enqueued]() {
+            scope_guard done([] { --pending; });
+            if (auto self = weak.lock()) {
+                const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - enqueued).count();
+                static uint64_t delayed = 0;
+                if (age > 50 && (++delayed == 1 || delayed % 100 == 0)) {
+                    PLOG_WARNING << "ice_receive_delay queue_ms=" << age << " pending=" << pending.load();
+                }
+                try { self->incoming(packet); }
+                catch (const std::exception& e) { PLOG_WARNING << "ICE receive: " << e.what(); }
+            }
+        });
+#else
+        iceTransport->incoming(make_message(b, b + size));
+#endif
 	} catch (const std::exception &e) {
 		PLOG_WARNING << e.what();
 	}

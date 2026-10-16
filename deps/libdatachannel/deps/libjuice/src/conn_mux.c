@@ -613,7 +613,9 @@ void conn_mux_cleanup(juice_agent_t *agent) {
 void conn_mux_lock(juice_agent_t *agent) {
 	conn_impl_t *conn_impl = agent->conn_impl;
 	conn_registry_t *registry = conn_impl->registry;
+	JLOG_DEBUG("ICE_TRACE phase=mux_mutex_lock begin");
 	mutex_lock(&registry->mutex);
+	JLOG_DEBUG("ICE_TRACE phase=mux_mutex_lock end");
 }
 
 void conn_mux_unlock(juice_agent_t *agent) {

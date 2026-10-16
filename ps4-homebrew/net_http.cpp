@@ -4,6 +4,7 @@
 #include "net/http.h"
 
 #include "network.h"
+#include "util/log.h"
 
 #include <orbis/Http.h>
 #include <orbis/libkernel.h>
@@ -11,6 +12,7 @@
 
 #include <cctype>
 #include <condition_variable>
+#include <chrono>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -21,33 +23,46 @@ std::mutex g_httpGateMutex;
 std::condition_variable g_httpGateChanged;
 size_t g_httpApiWaiters = 0;
 bool g_httpActive = false;
+bool g_backgroundActive = false;
+bool g_backgroundPaused = false;
+bool g_backgroundInterrupted = false;
+int32_t g_backgroundRequest = -1;
+thread_local bool g_backgroundThread = false;
 
 class HttpRequestLease {
 public:
+    explicit HttpRequestLease(bool imageRequest, bool background) : background_(background) {
         std::unique_lock<std::mutex> lock(g_httpGateMutex);
         if (!imageRequest) {
             ++g_httpApiWaiters;
+            g_httpGateChanged.wait(lock, [background] { return !g_httpActive && (!background || !g_backgroundPaused); });
             --g_httpApiWaiters;
         } else {
+            g_httpGateChanged.wait(lock, [background] { return !g_httpActive && g_httpApiWaiters == 0 && (!background || !g_backgroundPaused); });
         }
         g_httpActive = true;
+        if (background) g_backgroundActive = true;
     }
 
     ~HttpRequestLease() {
         {
             std::lock_guard<std::mutex> lock(g_httpGateMutex);
             g_httpActive = false;
+            if (background_) g_backgroundActive = false;
         }
         g_httpGateChanged.notify_all();
     }
 
     HttpRequestLease(const HttpRequestLease&) = delete;
     HttpRequestLease& operator=(const HttpRequestLease&) = delete;
+private:
+    bool background_;
 };
 
 void logHttp(const char* stage, const char* detail = "") {
     char line[384];
     std::snprintf(line, sizeof(line), "[%s] https stage=%s %s\n", kBuild, stage, detail);
+    XC_LOGI("%s", line);
 }
 
 int32_t verifyCertificate(int32_t, uint32_t verifyError, void* const[], int32_t, void*) {
@@ -103,10 +118,12 @@ std::string formEncode(const std::vector<std::pair<std::string, std::string>>& f
     return out;
 }
 
+static Response performAttempt(const Request& request, bool background) {
     // SceHttp uses one shared PS4 context. Keep each request lifecycle atomic,
     // and let login/catalog calls jump ahead of image downloads so artwork
     // cannot hold up library pagination.
     const bool imageRequest = request.url.find("store-images.s-microsoft.com") != std::string::npos;
+    HttpRequestLease requestLease(imageRequest, background);
     Response response;
     const bool traceStages = !imageRequest;
     auto trace = [&](const char* stage, const char* detail = "") {
@@ -166,6 +183,16 @@ std::string formEncode(const std::vector<std::pair<std::string, std::string>>& f
         return response;
     }
     trace("request-created");
+    if (background) {
+        std::lock_guard<std::mutex> lock(g_httpGateMutex);
+        g_backgroundRequest = req;
+        g_backgroundInterrupted = g_backgroundPaused;
+        if (g_backgroundPaused) {
+            response.error = "background_paused";
+            // Cleanup below unregisters the handle before deletion.
+            goto cleanup;
+        }
+    }
 
     for (const auto& [name, value] : request.headers) {
         rc = sceHttpAddRequestHeader(req, name.c_str(), value.c_str(), 0);
@@ -216,10 +243,72 @@ std::string formEncode(const std::vector<std::pair<std::string, std::string>>& f
     }
 
 cleanup:
+    if (background) {
+        std::lock_guard<std::mutex> lock(g_httpGateMutex);
+        if (g_backgroundInterrupted) { response.status = 0; response.error = "background_paused"; }
+        g_backgroundRequest = -1;
+        g_backgroundInterrupted = false;
+    }
     sceHttpDeleteRequest(req);
     sceHttpDeleteConnection(connection);
     sceHttpDeleteTemplate(templ);
     return response;
+}
+
+void setBackgroundHttpThread(bool background) { g_backgroundThread = background; }
+
+bool backgroundHttpPaused() {
+    std::lock_guard<std::mutex> lock(g_httpGateMutex);
+    return g_backgroundPaused;
+}
+
+bool pauseBackgroundHttp(bool paused) {
+    int32_t aborted = -1, result = 0;
+    const auto started = std::chrono::steady_clock::now();
+    {
+        // Serialize abort with request registration/deletion, not with the
+        // blocking send/read operation that abort must interrupt.
+        std::lock_guard<std::mutex> lock(g_httpGateMutex);
+        g_backgroundPaused = paused;
+        if (paused && g_backgroundRequest >= 0) {
+            aborted = g_backgroundRequest;
+            g_backgroundInterrupted = true;
+            result = sceHttpAbortRequest(aborted);
+        }
+    }
+    g_httpGateChanged.notify_all();
+    bool released = true;
+    if (paused) {
+        // Orbis libc++ timed condition waits are not reliable on this target.
+        // Poll briefly without owning the gate; cleanup can release the lease.
+        for (;;) {
+            { std::lock_guard<std::mutex> lock(g_httpGateMutex); released = !g_backgroundActive; }
+            if (released || std::chrono::steady_clock::now()-started >= std::chrono::seconds(5)) break;
+            sceKernelUsleep(1000);
+        }
+    }
+    const auto waitedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+    XC_LOGI("background_http paused=%u aborted_request=%d abort_rc=0x%08x lease_released=%u wait_ms=%lld",
+            paused ? 1u : 0u, aborted, static_cast<unsigned>(result), released ? 1u : 0u,
+            static_cast<long long>(waitedMs));
+    return released;
+}
+
+Response perform(const Request& request) {
+    const bool background = g_backgroundThread || request.url.find("store-images.s-microsoft.com") != std::string::npos;
+    auto deferredAt = std::chrono::steady_clock::now();
+    for (;;) {
+        auto response = performAttempt(request, background);
+        if (!background || response.error != "background_paused") return response;
+        // performAttempt released the shared context lease before waiting.
+        // Retrying the same catalog/image request preserves pagination state.
+        std::unique_lock<std::mutex> lock(g_httpGateMutex);
+        g_httpGateChanged.wait(lock, [] { return !g_backgroundPaused; });
+        lock.unlock();
+        const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - deferredAt).count();
+        XC_LOGI("background_http deferred_request_resumed wait_ms=%lld", static_cast<long long>(waited));
+        deferredAt = std::chrono::steady_clock::now();
+    }
 }
 
 } // namespace xc::net

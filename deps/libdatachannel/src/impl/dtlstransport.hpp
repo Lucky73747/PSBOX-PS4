@@ -79,6 +79,10 @@ protected:
 	mbedtls_ssl_context mSsl;
 
 	std::recursive_mutex mSslMutex;
+#if defined(__ORBIS__) || defined(__PS4__)
+    std::mutex mWriteOperationMutex;
+    std::atomic<bool> mWriteFailed{false};
+#endif
 
 	uint32_t mFinMs = 0, mIntMs = 0;
 	std::chrono::time_point<std::chrono::steady_clock> mTimerSetAt;
