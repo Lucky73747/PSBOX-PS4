@@ -11,6 +11,7 @@
 // shows the "slow connection" icon and keeps the bitrate low.
 #pragma once
 
+#include "stream/video_stats.h"
 #include <rtc/rtc.hpp>
 
 #include <atomic>
@@ -25,6 +26,7 @@ class RtcpReporter final : public rtc::MediaHandler {
 public:
     // `clockRate`: RTP clock of the track (90000 video, 48000 Opus).
     // `maxBitrate`: bits/s offered with REMB; 0 = no REMB (audio).
+    RtcpReporter(uint32_t clockRate, uint32_t maxBitrate, VideoReceiveStats* videoStats = nullptr);
 
     void incoming(rtc::message_vector& messages, const rtc::message_callback& send) override;
 
@@ -45,6 +47,7 @@ private:
     void report(uint64_t nowUs, const rtc::message_callback& send);
 
     const uint32_t clockRate_;
+    VideoReceiveStats* videoStats_ = nullptr;
     std::atomic<uint32_t> maxBitrate_{0};
     uint32_t mediaSsrc_ = 0;
     bool started_ = false;

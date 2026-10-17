@@ -155,6 +155,15 @@ struct GpuVideoRenderer {
     VkFramebuffer scaledFramebuffer = VK_NULL_HANDLE;
     VkImageLayout scaledLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkDescriptorSet rcasSet = VK_NULL_HANDLE;
+    VkImage supersampleImage = VK_NULL_HANDLE;
+    VkDeviceMemory supersampleMemory = VK_NULL_HANDLE;
+    VkImageView supersampleView = VK_NULL_HANDLE;
+    VkFramebuffer supersampleFramebuffer = VK_NULL_HANDLE;
+    VkExtent2D supersampleExtent{};
+    VkImageLayout supersampleLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkDescriptorSet supersampleRcasSet = VK_NULL_HANDLE;
+    bool supersampleAttempted = false;
+    bool supersampleAvailable = false;
     VkPipeline rcasPipeline = VK_NULL_HANDLE;
     VkPipeline uiPipeline = VK_NULL_HANDLE;
     VkPipelineLayout uiLayout = VK_NULL_HANDLE;
@@ -305,7 +314,9 @@ bool initGpuVideoRenderer(VkPhysicalDevice physical, VkDevice device, VkFormat o
     descriptorLayoutInfo.bindingCount = 3;
     descriptorLayoutInfo.pBindings = bindings;
     if (vkCreateDescriptorSetLayout(device, &descriptorLayoutInfo, nullptr, &gpu.descriptorLayout) != VK_SUCCESS) { logLine("gpu_video_init failed source_line=%d cpu_fallback=1", __LINE__); return false; }
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 9};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = 3; poolInfo.poolSizeCount = 1; poolInfo.pPoolSizes = &poolSize;
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &gpu.descriptorPool) != VK_SUCCESS) { logLine("gpu_video_init failed source_line=%d cpu_fallback=1", __LINE__); return false; }
     VkDescriptorSetAllocateInfo setInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     setInfo.descriptorPool = gpu.descriptorPool;
@@ -445,6 +456,91 @@ bool initGpuVideoRenderer(VkPhysicalDevice physical, VkDevice device, VkFormat o
     vkDestroyShaderModule(device, frag, nullptr);
     vkDestroyShaderModule(device, vert, nullptr);
     gpu.initialized = true;
+    return true;
+}
+
+bool ensureSupersample2x(VkPhysicalDevice physical, GpuVideoRenderer& gpu) {
+    if (gpu.supersampleAttempted) return gpu.supersampleAvailable;
+    gpu.supersampleAttempted = true;
+    auto cleanupPartial = [&]() {
+        if (gpu.supersampleFramebuffer) vkDestroyFramebuffer(gpu.device, gpu.supersampleFramebuffer, nullptr);
+        if (gpu.supersampleView) vkDestroyImageView(gpu.device, gpu.supersampleView, nullptr);
+        if (gpu.supersampleImage) vkDestroyImage(gpu.device, gpu.supersampleImage, nullptr);
+        if (gpu.supersampleMemory) vkFreeMemory(gpu.device, gpu.supersampleMemory, nullptr);
+        gpu.supersampleFramebuffer = VK_NULL_HANDLE;
+        gpu.supersampleView = VK_NULL_HANDLE;
+        gpu.supersampleImage = VK_NULL_HANDLE;
+        gpu.supersampleMemory = VK_NULL_HANDLE;
+    };
+    if (gpu.extent.width > UINT32_MAX / 2 || gpu.extent.height > UINT32_MAX / 2) {
+        logLine("gpu_scaler supersample2x unavailable reason=extent_overflow");
+        return false;
+    }
+    gpu.supersampleExtent = {gpu.extent.width * 2, gpu.extent.height * 2};
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(physical, &properties);
+    if (gpu.supersampleExtent.width > properties.limits.maxImageDimension2D ||
+        gpu.supersampleExtent.height > properties.limits.maxImageDimension2D ||
+        gpu.supersampleExtent.width > properties.limits.maxFramebufferWidth ||
+        gpu.supersampleExtent.height > properties.limits.maxFramebufferHeight ||
+        gpu.supersampleExtent.width > properties.limits.maxViewportDimensions[0] ||
+        gpu.supersampleExtent.height > properties.limits.maxViewportDimensions[1]) {
+        logLine("gpu_scaler supersample2x unavailable reason=device_image_limit target=%ux%u limit=%u",
+                gpu.supersampleExtent.width, gpu.supersampleExtent.height,
+                properties.limits.maxImageDimension2D);
+        return false;
+    }
+    if (!createGpuImage(physical, gpu.device, gpu.outputFormat, gpu.supersampleExtent,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            gpu.supersampleImage, gpu.supersampleMemory, gpu.supersampleView)) {
+        cleanupPartial();
+        logLine("gpu_scaler supersample2x unavailable reason=image_allocation target=%ux%u",
+                gpu.supersampleExtent.width, gpu.supersampleExtent.height);
+        return false;
+    }
+    VkFramebufferCreateInfo framebufferInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    framebufferInfo.renderPass = gpu.renderPass;
+    framebufferInfo.attachmentCount = 1;
+    framebufferInfo.pAttachments = &gpu.supersampleView;
+    framebufferInfo.width = gpu.supersampleExtent.width;
+    framebufferInfo.height = gpu.supersampleExtent.height;
+    framebufferInfo.layers = 1;
+    if (vkCreateFramebuffer(gpu.device, &framebufferInfo, nullptr, &gpu.supersampleFramebuffer) != VK_SUCCESS) {
+        cleanupPartial();
+        logLine("gpu_scaler supersample2x unavailable reason=framebuffer target=%ux%u",
+                gpu.supersampleExtent.width, gpu.supersampleExtent.height);
+        return false;
+    }
+    VkDescriptorSetAllocateInfo setInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    setInfo.descriptorPool = gpu.descriptorPool;
+    setInfo.descriptorSetCount = 1;
+    setInfo.pSetLayouts = &gpu.descriptorLayout;
+    if (vkAllocateDescriptorSets(gpu.device, &setInfo, &gpu.supersampleRcasSet) != VK_SUCCESS) {
+        cleanupPartial();
+        logLine("gpu_scaler supersample2x unavailable reason=descriptor_set");
+        return false;
+    }
+    VkDescriptorImageInfo images[3] = {
+        {gpu.sampler, gpu.supersampleView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {gpu.sampler, gpu.uvView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {gpu.sampler, gpu.overlayView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+    VkWriteDescriptorSet writes[3]{};
+    for (uint32_t i = 0; i < 3; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = gpu.supersampleRcasSet;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &images[i];
+    }
+    vkUpdateDescriptorSets(gpu.device, 3, writes, 0, nullptr);
+    gpu.supersampleAvailable = true;
+    const uint64_t estimatedBytes = static_cast<uint64_t>(gpu.supersampleExtent.width) *
+                                    gpu.supersampleExtent.height * 4;
+    logLine("gpu_scaler supersample2x ready target=%ux%u output=%ux%u estimated_image_bytes=%llu format_bytes_per_pixel=4",
+            gpu.supersampleExtent.width, gpu.supersampleExtent.height,
+            gpu.extent.width, gpu.extent.height,
+            static_cast<unsigned long long>(estimatedBytes));
     return true;
 }
 
@@ -676,6 +772,7 @@ PresentationHeartbeat presentationHeartbeat() {
     bool gpuYuvInitialized = false;
     bool gpuVideoHasFrame = false;
     uint32_t lastVideoWidth = 0, lastVideoHeight = 0;
+    VideoColorInfo activeVideoColor{};
 
     using Clock = std::chrono::steady_clock;
     uint32_t targetFps = 60;
@@ -768,6 +865,7 @@ PresentationHeartbeat presentationHeartbeat() {
             markPresentation(3); // NV12 upload copy
             uploadedVideoFrame = uploadVideo(userData, gpuVideo.videoMapped,
                                               static_cast<size_t>(gpuVideo.videoCapacity),
+                                              &videoWidth, &videoHeight, &activeVideoColor);
             if (uploadedVideoFrame) {
                 if (!videoWidth || !videoHeight || videoWidth > 1920 || videoHeight > 1088 ||
                     (videoWidth & 1u) || (videoHeight & 1u))
@@ -906,10 +1004,29 @@ PresentationHeartbeat presentationHeartbeat() {
                 gpuOverlayInitialized = true;
             }
 
+            // 2x creates a 4K intermediate for 1080p output. Never allocate or
+            // run it for a 720p (or other non-1080p) source.
+            const bool sourceIs1080p = lastVideoWidth == 1920 && lastVideoHeight == 1080;
+            const bool outputIs1080p = extent.width == 1920 && extent.height == 1080;
+            const bool requestedSupersample2x = updateResult.fsrScaleFactor == 2 &&
+                updateResult.upscaler == 1 && updateResult.requested1080p && sourceIs1080p && outputIs1080p;
+            const bool supersample2x = gpuVideoEnabled && gpuVideoHasFrame && updateResult.videoActive && requestedSupersample2x &&
+                ensureSupersample2x(physical, gpuVideo);
+            const bool strictUpscale = gpuVideoHasFrame && extent.width >= lastVideoWidth &&
+                extent.height >= lastVideoHeight &&
+                (extent.width > lastVideoWidth || extent.height > lastVideoHeight);
+            const bool nativeRcas1080p = updateResult.nativeRcas && updateResult.requested1080p && sourceIs1080p && outputIs1080p;
             const bool doRcas = gpuVideoHasFrame && updateResult.videoActive && updateResult.upscaler == 1 &&
+                (supersample2x || strictUpscale || nativeRcas1080p);
+            const VkExtent2D videoPassExtent = doRcas && supersample2x ? gpuVideo.supersampleExtent : extent;
             if (doRcas) {
+                VkImage targetImage = supersample2x ? gpuVideo.supersampleImage : gpuVideo.scaledImage;
+                VkImageLayout targetLayout = supersample2x ? gpuVideo.supersampleLayout : gpuVideo.scaledLayout;
+                transitionImage(command, targetImage, targetLayout,
                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    targetLayout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    targetLayout == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_SHADER_READ_BIT,
                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
             }
             transitionImage(command, gpuVideo.renderImage, gpuVideo.renderLayout,
@@ -921,9 +1038,15 @@ PresentationHeartbeat presentationHeartbeat() {
                             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
             VkRenderPassBeginInfo renderBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
             renderBegin.renderPass = gpuVideo.renderPass;
+            renderBegin.framebuffer = doRcas ? (supersample2x ? gpuVideo.supersampleFramebuffer : gpuVideo.scaledFramebuffer)
+                                             : gpuVideo.framebuffer;
+            renderBegin.renderArea = {{0, 0}, videoPassExtent};
             vkCmdBeginRenderPass(command, &renderBegin, VK_SUBPASS_CONTENTS_INLINE);
             VkViewport viewport{};
+            viewport.width = static_cast<float>(videoPassExtent.width);
+            viewport.height = static_cast<float>(videoPassExtent.height);
             viewport.minDepth = 0.0f; viewport.maxDepth = 1.0f;
+            VkRect2D scissor{{0, 0}, videoPassExtent};
             vkCmdSetViewport(command, 0, 1, &viewport);
             vkCmdSetScissor(command, 0, 1, &scissor);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, gpuVideo.pipeline);
@@ -931,14 +1054,37 @@ PresentationHeartbeat presentationHeartbeat() {
                                     0, 1, &gpuVideo.descriptorSet, 0, nullptr);
             struct VideoPushConstants { float rect[4]; int32_t width, height, enabled, gpuUi; int32_t targetWidth, targetHeight, upscaler, padding; } params{};
             params.gpuUi = (useGpuUi || doRcas) ? 1 : 0;
+            const uint32_t matrixCode = static_cast<uint32_t>(activeVideoColor.matrix) & 3u;
+            const uint32_t colorFlags = matrixCode | (activeVideoColor.fullRange ? 4u : 0u);
+            params.padding = static_cast<int32_t>(std::min(updateResult.rcasSharpness,4u) |
+                                                   (supersample2x ? 32u : 0u) |
+                                                   (colorFlags << 8));
+            params.targetWidth = videoPassExtent.width; params.targetHeight = videoPassExtent.height;
             params.upscaler = updateResult.upscaler == 1 ? 1 : 0;
             params.width = static_cast<int32_t>(lastVideoWidth);
             params.height = static_cast<int32_t>(lastVideoHeight);
             params.enabled = gpuVideoHasFrame && updateResult.videoActive ? 1 : 0;
             if (params.enabled) {
                 double rectWidth = 1.0, rectHeight = 1.0, x = 0.0, y = 0.0;
+                if (updateResult.upscaler == 2) {
+                    // Native mode maps source pixels 1:1 to the output center.
+                    // If the source exceeds the display, center-crop without scaling.
+                    const double drawWidth = std::min(lastVideoWidth, extent.width);
+                    const double drawHeight = std::min(lastVideoHeight, extent.height);
+                    rectWidth = drawWidth / extent.width;
+                    rectHeight = drawHeight / extent.height;
+                    x = (1.0 - rectWidth) * 0.5;
                     y = (1.0 - rectHeight) * 0.5;
                 } else {
+                    const double sourceAspect = static_cast<double>(lastVideoWidth) / lastVideoHeight;
+                    const double targetAspect = static_cast<double>(extent.width) / extent.height;
+                    if (sourceAspect > targetAspect) {
+                        rectHeight = targetAspect / sourceAspect;
+                        y = (1.0 - rectHeight) * 0.5;
+                    } else {
+                        rectWidth = sourceAspect / targetAspect;
+                        x = (1.0 - rectWidth) * 0.5;
+                    }
                 }
                 params.rect[0] = static_cast<float>(x);
                 params.rect[1] = static_cast<float>(y);
@@ -947,23 +1093,73 @@ PresentationHeartbeat presentationHeartbeat() {
             } else {
                 params.rect[2] = params.rect[3] = 1.0f;
             }
+            // Report the exact scaler branch selected for this source/output pair.
+            static int previousScaler[10] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+            const int outputWidth = static_cast<int>(extent.width * (params.rect[2]-params.rect[0]));
+            const int outputHeight = static_cast<int>(extent.height * (params.rect[3]-params.rect[1]));
             const bool easuActive = params.enabled && params.upscaler == 1 &&
+                (strictUpscale || supersample2x);
+            const int scalerState[10] = {params.enabled, params.upscaler, params.width, params.height,
+                outputWidth, outputHeight, params.padding, static_cast<int>(updateResult.fsrScaleFactor),
+                supersample2x ? 1 : 0, updateResult.requested1080p ? 1 : 0};
             bool scalerChanged = false;
+            for (int i=0; i<10; ++i) if (previousScaler[i] != scalerState[i]) scalerChanged = true;
             if (scalerChanged) {
+                for (int i=0; i<10; ++i) previousScaler[i] = scalerState[i];
+                logLine("gpu_scaler selected=%s effective=%s source=%dx%d easu_target=%ux%u output=%dx%d requested_scale_factor=%ux requested_tier_1080p=%u supersample_active=%u video_enabled=%d easu_active=%u native_rcas_1080_enabled=%u source_is_1080p=%u rcas_active=%u rcas_level=%u rcas_stops=%.1f resolve=box2x2 denoise=on shader=rgb_active_bounds",
+                    updateResult.upscaler == 2 ? "native-1to1" : updateResult.upscaler == 1 ? "fsr1-easu-rcas" : "bilinear",
+                    !params.enabled ? "inactive" : updateResult.upscaler == 2 ? "native-1to1-no-scaling" :
+                        supersample2x ? "fsr1-easu-2x+rcas-downsample" :
+                        doRcas ? (easuActive ? "fsr1-easu-rgb+rcas" : "native-rgb+rcas") : "bilinear",
+                    params.width, params.height, params.targetWidth, params.targetHeight,
+                    outputWidth, outputHeight, updateResult.fsrScaleFactor, updateResult.requested1080p ? 1u : 0u,
+                    supersample2x ? 1u : 0u, params.enabled, easuActive ? 1u : 0u,
+                    nativeRcas1080p ? 1u : 0u, sourceIs1080p ? 1u : 0u, doRcas ? 1u : 0u,
+                    static_cast<unsigned>(params.padding) & 7u,
+                    (static_cast<unsigned>(params.padding) & 7u) * 0.5);
+            }
+            static int previousColorFlags = -1;
+            const int colorState = static_cast<int>(colorFlags) |
+                (activeVideoColor.matrixSignaled ? 1 << 4 : 0) |
+                (activeVideoColor.rangeSignaled ? 1 << 5 : 0) |
+                (static_cast<int>(activeVideoColor.signaledMatrixCoefficients) << 8);
+            if (previousColorFlags != colorState) {
+                previousColorFlags = colorState;
+                const char* matrixName = activeVideoColor.matrix == VideoColorMatrix::Bt601 ? "bt601" :
+                    activeVideoColor.matrix == VideoColorMatrix::Bt2020 ? "bt2020" : "bt709";
+                logLine("gpu_color matrix=%s range=%s matrix_signaled=%u range_signaled=%u raw_matrix_coefficients=%u default=bt709-limited",
+                    matrixName, activeVideoColor.fullRange ? "full" : "limited",
+                    activeVideoColor.matrixSignaled ? 1u : 0u,
+                    activeVideoColor.rangeSignaled ? 1u : 0u,
+                    static_cast<unsigned>(activeVideoColor.signaledMatrixCoefficients));
             }
             vkCmdPushConstants(command, gpuVideo.pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(params), &params);
             vkCmdDraw(command, 3, 1, 0, 0);
             if (doRcas) {
                 vkCmdEndRenderPass(command);
+                VkImage upscaleImage = supersample2x ? gpuVideo.supersampleImage : gpuVideo.scaledImage;
+                VkImageLayout& upscaleLayout = supersample2x ? gpuVideo.supersampleLayout : gpuVideo.scaledLayout;
+                transitionImage(command, upscaleImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+                upscaleLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                 renderBegin.framebuffer = gpuVideo.framebuffer;
+                renderBegin.renderArea = {{0, 0}, extent};
                 vkCmdBeginRenderPass(command, &renderBegin, VK_SUBPASS_CONTENTS_INLINE);
+                viewport.width = static_cast<float>(extent.width);
+                viewport.height = static_cast<float>(extent.height);
+                scissor = {{0, 0}, extent};
+                vkCmdSetViewport(command, 0, 1, &viewport);
+                vkCmdSetScissor(command, 0, 1, &scissor);
                 vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, gpuVideo.rcasPipeline);
+                VkDescriptorSet rcasSet = supersample2x ? gpuVideo.supersampleRcasSet : gpuVideo.rcasSet;
                 vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, gpuVideo.pipelineLayout,
+                    0, 1, &rcasSet, 0, nullptr);
                 params.gpuUi = useGpuUi ? 1 : 0;
+                params.targetWidth = extent.width;
+                params.targetHeight = extent.height;
                 vkCmdPushConstants(command, gpuVideo.pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(params), &params);
                 vkCmdDraw(command, 3, 1, 0, 0);
             }

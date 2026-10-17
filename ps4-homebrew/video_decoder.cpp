@@ -50,8 +50,31 @@ struct YuvLookup {
     int32_t blueU[256]{};
 };
 
+constexpr size_t kColorMatrixCount = 3;
+constexpr size_t kColorRangeCount = 2;
+YuvLookup g_yuvLookup[kColorMatrixCount][kColorRangeCount];
 
 void initializeYuvLookup() {
+    struct Coefficients { int y, rV, gU, gV, bU; };
+    static constexpr Coefficients kCoefficients[kColorMatrixCount][kColorRangeCount] = {
+        {{298, 459, -55, -136, 541}, {256, 403, -48, -120, 475}}, // BT.709
+        {{298, 409, -100, -208, 516}, {256, 359, -88, -183, 454}}, // BT.601
+        {{298, 430, -48, -167, 548}, {256, 378, -42, -146, 482}}, // BT.2020
+    };
+    for (size_t matrix = 0; matrix < kColorMatrixCount; ++matrix) {
+        for (size_t range = 0; range < kColorRangeCount; ++range) {
+            const auto c = kCoefficients[matrix][range];
+            auto& table = g_yuvLookup[matrix][range];
+            for (int value = 0; value < 256; ++value) {
+                const int luma = range == 0 ? std::max(0, value - 16) : value;
+                const int chroma = value - 128;
+                table.y[value] = c.y * luma + 128;
+                table.redV[value] = c.rV * chroma;
+                table.greenU[value] = c.gU * chroma;
+                table.greenV[value] = c.gV * chroma;
+                table.blueU[value] = c.bU * chroma;
+            }
+        }
     }
 }
 
@@ -284,6 +307,7 @@ struct DecoderState {
         Block accessUnit{}, output{};
         bool pending = false;
         uint64_t submittedAtUs = 0;
+        VideoColorInfo color{};
     };
     std::array<Slot, 4> slots{};
     size_t nextSurface = 0;
@@ -317,7 +341,13 @@ struct DecoderState {
         release(shared); release(gpu); release(cpu); release(compute);
     }
     uint64_t pts = 1;
+    struct ParameterSet {
+        std::vector<uint8_t> bytes;
+        uint32_t spsId = 0;
+        VideoColorInfo color{};
+    };
     std::map<uint32_t, ParameterSet> sps, pps;
+    VideoColorInfo activeColor{};
     bool waitingIdr = false;
     bool recoveryPending = false;
     uint64_t lastResetUs = 0;
@@ -332,6 +362,7 @@ struct AccessUnitInfo {
     bool validPpsId = false;
     uint32_t ppsId = 0;
     uint32_t slices = 0;
+    VideoColorInfo color{};
 };
 
 // Only the leading syntax fields are needed to match parameter-set IDs.
@@ -366,6 +397,154 @@ struct NalHeaderReader {
     }
 };
 
+struct SpsBitReader {
+    std::vector<uint8_t> rbsp;
+    size_t bit = 0;
+
+    SpsBitReader(const uint8_t* data, size_t size) {
+        rbsp.reserve(size);
+        unsigned zeros = 0;
+        for (size_t i = 0; i < size; ++i) {
+            if (zeros >= 2 && data[i] == 3) { zeros = 0; continue; }
+            rbsp.push_back(data[i]);
+            zeros = data[i] == 0 ? zeros + 1 : 0;
+        }
+    }
+    bool bits(unsigned count, uint32_t& value) {
+        if (count > 32 || bit + count > rbsp.size() * 8) return false;
+        value = 0;
+        for (unsigned i = 0; i < count; ++i, ++bit)
+            value = (value << 1) | ((rbsp[bit / 8] >> (7 - bit % 8)) & 1u);
+        return true;
+    }
+    bool flag(bool& value) {
+        uint32_t v = 0;
+        if (!bits(1, v)) return false;
+        value = v != 0;
+        return true;
+    }
+    bool ue(uint32_t& value) {
+        unsigned leading = 0;
+        uint32_t b = 0;
+        while (true) {
+            if (!bits(1, b)) return false;
+            if (b) break;
+            if (++leading > 31) return false;
+        }
+        uint32_t suffix = 0;
+        if (leading && !bits(leading, suffix)) return false;
+        value = ((uint32_t{1} << leading) - 1u) + suffix;
+        return true;
+    }
+    bool se(int32_t& value) {
+        uint32_t code = 0;
+        if (!ue(code) || code > 0x7fffffffu) return false;
+        const int64_t signedValue = (code & 1u) ? (static_cast<int64_t>(code) + 1) / 2
+                                                : -static_cast<int64_t>(code) / 2;
+        value = static_cast<int32_t>(signedValue);
+        return true;
+    }
+};
+
+bool skipScalingList(SpsBitReader& reader, unsigned count) {
+    int32_t lastScale = 8, nextScale = 8;
+    for (unsigned i = 0; i < count; ++i) {
+        if (nextScale != 0) {
+            int32_t delta = 0;
+            if (!reader.se(delta)) return false;
+            nextScale = (lastScale + delta + 256) % 256;
+        }
+        if (nextScale != 0) lastScale = nextScale;
+    }
+    return true;
+}
+
+bool parseSpsColor(const uint8_t* nal, size_t size, VideoColorInfo& color) {
+    if (!nal || size < 5 || size > 4096) return false;
+    SpsBitReader reader(nal + 1, size - 1);
+    uint32_t profile = 0, ignored = 0, spsId = 0;
+    if (!reader.bits(8, profile) || !reader.bits(16, ignored) || !reader.ue(spsId)) return false;
+    (void)spsId;
+
+    uint32_t chromaFormat = 1;
+    if (profile == 100 || profile == 110 || profile == 122 || profile == 244 ||
+        profile == 44 || profile == 83 || profile == 86 || profile == 118 ||
+        profile == 128 || profile == 138 || profile == 139 || profile == 134 ||
+        profile == 135 || profile == 144) {
+        if (!reader.ue(chromaFormat) || chromaFormat > 3) return false;
+        if (chromaFormat == 3 && !reader.bits(1, ignored)) return false;
+        uint32_t bitDepth = 0;
+        bool scalingMatrix = false;
+        if (!reader.ue(bitDepth) || !reader.ue(bitDepth) || !reader.bits(1, ignored) ||
+            !reader.flag(scalingMatrix)) return false;
+        if (scalingMatrix) {
+            const unsigned listCount = chromaFormat == 3 ? 12 : 8;
+            for (unsigned i = 0; i < listCount; ++i) {
+                bool present = false;
+                if (!reader.flag(present)) return false;
+                if (present && !skipScalingList(reader, i < 6 ? 16 : 64)) return false;
+            }
+        }
+    }
+
+    uint32_t value = 0, pocType = 0;
+    if (!reader.ue(value) || !reader.ue(pocType) || pocType > 2) return false;
+    if (pocType == 0) {
+        if (!reader.ue(value)) return false;
+    } else if (pocType == 1) {
+        bool deltaAlwaysZero = false;
+        int32_t signedValue = 0;
+        if (!reader.flag(deltaAlwaysZero) || !reader.se(signedValue) || !reader.se(signedValue)) return false;
+        (void)deltaAlwaysZero;
+        uint32_t cycle = 0;
+        if (!reader.ue(cycle) || cycle > 256) return false;
+        for (uint32_t i = 0; i < cycle; ++i) if (!reader.se(signedValue)) return false;
+    }
+    bool flag = false;
+    if (!reader.ue(value) || !reader.flag(flag) || !reader.ue(value) || !reader.ue(value) ||
+        !reader.flag(flag)) return false;
+    if (!flag && !reader.flag(flag)) return false;
+    if (!reader.flag(flag)) return false; // direct_8x8_inference_flag
+    bool cropping = false;
+    if (!reader.flag(cropping)) return false;
+    if (cropping) for (unsigned i = 0; i < 4; ++i) if (!reader.ue(value)) return false;
+    bool vui = false;
+    if (!reader.flag(vui)) return false;
+    if (!vui) return true;
+
+    bool present = false;
+    if (!reader.flag(present)) return false; // aspect_ratio_info_present_flag
+    if (present) {
+        uint32_t aspect = 0;
+        if (!reader.bits(8, aspect)) return false;
+        if (aspect == 255 && !reader.bits(32, ignored)) return false;
+    }
+    if (!reader.flag(present)) return false; // overscan_info_present_flag
+    if (present && !reader.flag(flag)) return false;
+    if (!reader.flag(present)) return false; // video_signal_type_present_flag
+    if (!present) return true;
+    uint32_t videoFormat = 0;
+    if (!reader.bits(3, videoFormat) || !reader.flag(color.fullRange)) return false;
+    (void)videoFormat;
+    color.rangeSignaled = true;
+    bool colorDescription = false;
+    if (!reader.flag(colorDescription)) return false;
+    if (!colorDescription) return true;
+    uint32_t primaries = 0, transfer = 0, matrix = 0;
+    if (!reader.bits(8, primaries) || !reader.bits(8, transfer) || !reader.bits(8, matrix)) return false;
+    (void)primaries;
+    (void)transfer;
+    color.signaledMatrixCoefficients = static_cast<uint8_t>(matrix);
+    switch (matrix) {
+        case 1: color.matrix = VideoColorMatrix::Bt709; color.matrixSignaled = true; break;
+        case 5:
+        case 6: color.matrix = VideoColorMatrix::Bt601; color.matrixSignaled = true; break;
+        case 9: color.matrix = VideoColorMatrix::Bt2020; color.matrixSignaled = true; break;
+        default: color.matrix = VideoColorMatrix::Bt709; color.matrixSignaled = false; break;
+    }
+    return true;
+}
+
 bool containsIdr(const std::vector<uint8_t>& bytes) {
     for (size_t i = 0; i + 3 < bytes.size(); ++i) {
         if (bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1 &&
@@ -393,9 +572,12 @@ AccessUnitInfo cacheParameterSets(const std::vector<uint8_t>& bytes, DecoderStat
         if (begin >= end) continue;
         const uint8_t type = bytes[begin] & 31u;
         if (type == 1 || type == 5) ++info.slices;
+        if (type != 1 && type != 5 && type != 7 && type != 8) continue;
         NalHeaderReader reader(bytes.data() + begin + 1, end - begin - 1);
         uint32_t id = 0, parent = 0;
+        if (type == 1 || type == 5) {
             uint32_t firstMb = 0, sliceType = 0;
+            if (type == 5) info.idr = true;
             if (reader.ue(firstMb) && reader.ue(sliceType) && reader.ue(id) && id <= 255) {
                 info.validPpsId = true;
                 info.ppsId = id;
@@ -410,8 +592,30 @@ AccessUnitInfo cacheParameterSets(const std::vector<uint8_t>& bytes, DecoderStat
         entry.bytes = {0, 0, 0, 1};
         entry.bytes.insert(entry.bytes.end(), bytes.begin() + begin, bytes.begin() + end);
         entry.spsId = type == 7 ? id : parent;
+        if (type == 7) {
+            const bool parsedColor = parseSpsColor(bytes.data() + begin, end - begin, entry.color);
+            if (!parsedColor)
+                entry.color = VideoColorInfo{};
+            const char* matrixName = entry.color.matrix == VideoColorMatrix::Bt601 ? "bt601" :
+                entry.color.matrix == VideoColorMatrix::Bt2020 ? "bt2020" : "bt709";
+            logLine("video_color_sps sps_id=%u matrix=%s range=%s matrix_signaled=%u range_signaled=%u raw_matrix_coefficients=%u parse=%s default=bt709-limited",
+                id, matrixName, entry.color.fullRange ? "full" : "limited",
+                entry.color.matrixSignaled ? 1u : 0u, entry.color.rangeSignaled ? 1u : 0u,
+                static_cast<unsigned>(entry.color.signaledMatrixCoefficients), parsedColor ? "ok" : "fallback");
+            state.sps[id] = std::move(entry);
+            info.sps = true;
+        }
         else { state.pps[id] = std::move(entry); info.pps = true; }
     }
+    info.color = state.activeColor;
+    if (info.validPpsId) {
+        const auto pps = state.pps.find(info.ppsId);
+        if (pps != state.pps.end()) {
+            const auto sps = state.sps.find(pps->second.spsId);
+            if (sps != state.sps.end()) info.color = sps->second.color;
+        }
+    }
+    state.activeColor = info.color;
     return info;
 }
 
@@ -688,6 +892,8 @@ VideoPerformanceSnapshot VideoDecoder::performanceSnapshot() const {
     return result;
 }
 
+bool VideoDecoder::copyLatestToCanvas(uint32_t* destination, uint32_t width, uint32_t height,
+                                      bool native1to1) {
     if (!destination || !width || !height) return false;
     uint32_t sourceWidth = 0;
     uint32_t sourceHeight = 0;
@@ -712,24 +918,37 @@ VideoPerformanceSnapshot VideoDecoder::performanceSnapshot() const {
     std::fill(destination, destination + static_cast<size_t>(width) * height, 0xff000000u);
     uint32_t outWidth = width;
     uint32_t outHeight = height;
+    if (native1to1) {
+        outWidth = std::min(sourceWidth, width);
+        outHeight = std::min(sourceHeight, height);
+    } else if (static_cast<uint64_t>(sourceWidth) * height > static_cast<uint64_t>(sourceHeight) * width) {
         outHeight = static_cast<uint32_t>(static_cast<uint64_t>(sourceHeight) * width / sourceWidth);
+    } else {
         outWidth = static_cast<uint32_t>(static_cast<uint64_t>(sourceWidth) * height / sourceHeight);
+    }
     outWidth = std::max(1u, outWidth);
     outHeight = std::max(1u, outHeight);
     const uint32_t x0 = (width - outWidth) / 2;
     const uint32_t y0 = (height - outHeight) / 2;
 
     if (scaleSourceWidth_ != sourceWidth || scaleSourceHeight_ != sourceHeight ||
+        scaleOutputWidth_ != outWidth || scaleOutputHeight_ != outHeight ||
+        scaleNative1to1_ != native1to1) {
         scaleX_.resize(outWidth);
         scaleY_.resize(outHeight);
+        const uint32_t cropX = native1to1 && sourceWidth > outWidth ? (sourceWidth - outWidth) / 2 : 0;
+        const uint32_t cropY = native1to1 && sourceHeight > outHeight ? (sourceHeight - outHeight) / 2 : 0;
         for (uint32_t x = 0; x < outWidth; ++x)
+            scaleX_[x] = native1to1 ? cropX + x : std::min(sourceWidth - 1,
                 static_cast<uint32_t>(static_cast<uint64_t>(x) * sourceWidth / outWidth));
         for (uint32_t y = 0; y < outHeight; ++y)
+            scaleY_[y] = native1to1 ? cropY + y : std::min(sourceHeight - 1,
                 static_cast<uint32_t>(static_cast<uint64_t>(y) * sourceHeight / outHeight));
         scaleSourceWidth_ = sourceWidth;
         scaleSourceHeight_ = sourceHeight;
         scaleOutputWidth_ = outWidth;
         scaleOutputHeight_ = outHeight;
+        scaleNative1to1_ = native1to1;
     }
 
     for (uint32_t y = 0; y < outHeight; ++y) {
@@ -742,10 +961,13 @@ VideoPerformanceSnapshot VideoDecoder::performanceSnapshot() const {
 }
 
 bool VideoDecoder::copyLatestNv12To(uint8_t* destination, size_t capacity,
+                                    uint32_t& width, uint32_t& height,
+                                    VideoColorInfo& color) {
     if (!destination) return false;
     {
         std::unique_lock<std::mutex> lock(playoutMutex_, std::try_to_lock);
         if (!lock.owns_lock()) return false;
+        if (!playout_.takeNext(nv12UploadScratch_, capacity, width, height, color,
                               presentationFps_.load(std::memory_order_relaxed), playoutDelayFrames_.load(std::memory_order_relaxed))) return false;
     }
     // The multi-MiB copy no longer holds the AU receiver/publication lock.
@@ -856,6 +1078,7 @@ bool VideoDecoder::decode(const AccessUnit& accessUnit, bool publishOutput, size
     markStage(1); // H.264 parse
     const auto parseStart = std::chrono::steady_clock::now();
     const AccessUnitInfo unitInfo = cacheParameterSets(accessUnit.bytes, *state);
+    slot.color = unitInfo.color;
     auto cost = [this](size_t i, uint64_t us) {
         auto& c = stageCosts_[i]; c.sum += us; c.peak = std::max(c.peak, us); ++c.calls;
     };
@@ -1061,6 +1284,7 @@ bool VideoDecoder::decode(const AccessUnit& accessUnit, bool publishOutput, size
         markStage(6); // NV12 publication/CPU fallback
         if (!publishNv12(decodedFrame, decodedFrameSize,
                          output.width, output.height, pitchBytes,
+                         output.format, completed->color)) return false;
         convertUs = elapsedUs(convertStart);
         convertTimeUsWindow_ += convertUs;
         ++publishedFrames_;
@@ -1180,6 +1404,8 @@ bool VideoDecoder::decode(const AccessUnit& accessUnit, bool publishOutput, size
 }
 
 bool VideoDecoder::publishNv12(const void* raw, size_t available, uint32_t width,
+                               uint32_t paddedHeight, uint32_t pitch, uint32_t format,
+                               const VideoColorInfo& color) {
     if (!raw || format != 0 || pitch < width || paddedHeight < 16) return false;
     const uint64_t yBytes = static_cast<uint64_t>(pitch) * paddedHeight;
     const uint32_t visibleHeight = std::min(paddedHeight, 1080u);
@@ -1221,6 +1447,7 @@ bool VideoDecoder::publishNv12(const void* raw, size_t available, uint32_t width
         }
         {
             std::lock_guard<std::mutex> lock(playoutMutex_);
+            playout_.push(nv12PublishScratch_, width, visibleHeight, latestSequence_, color);
         }
         lastOutputTimeUs_.store(sceKernelGetProcessTime(), std::memory_order_relaxed);
         return true;
@@ -1229,6 +1456,7 @@ bool VideoDecoder::publishNv12(const void* raw, size_t available, uint32_t width
     conversionNextRow_.store(0, std::memory_order_relaxed);
     if (conversionWorkerCount_ == 0) {
         conversionCallerLastCpu_.store(sceKernelGetCurrentCpu(), std::memory_order_relaxed);
+        convertRows(src, uv, width, visibleHeight, pitch, rgbaScratch_.data(), color);
     } else {
         {
             std::lock_guard<std::mutex> lock(conversionMutex_);
@@ -1238,11 +1466,13 @@ bool VideoDecoder::publishNv12(const void* raw, size_t available, uint32_t width
             conversionHeight_ = visibleHeight;
             conversionPitch_ = pitch;
             conversionDestination_ = rgbaScratch_.data();
+            conversionColor_ = color;
             conversionPending_ = conversionWorkerCount_;
             ++conversionGeneration_;
         }
         conversionWake_.notify_all();
         conversionCallerLastCpu_.store(sceKernelGetCurrentCpu(), std::memory_order_relaxed);
+        convertRows(src, uv, width, visibleHeight, pitch, rgbaScratch_.data(), color);
         std::unique_lock<std::mutex> lock(conversionMutex_);
         conversionDone_.wait(lock, [this] { return conversionPending_ == 0; });
     }
@@ -1258,6 +1488,10 @@ bool VideoDecoder::publishNv12(const void* raw, size_t available, uint32_t width
 
 void VideoDecoder::convertRows(const uint8_t* yPlane, const uint8_t* uvPlane,
                                uint32_t width, uint32_t height, uint32_t pitch,
+                               uint32_t* destination, const VideoColorInfo& color) {
+    const size_t matrix = std::min(static_cast<size_t>(color.matrix), kColorMatrixCount - 1);
+    const size_t range = color.fullRange ? 1u : 0u;
+    const auto& lookup = g_yuvLookup[matrix][range];
     for (;;) {
         const uint32_t first = conversionNextRow_.fetch_add(kConversionBandRows,
                                                               std::memory_order_relaxed);
@@ -1270,6 +1504,10 @@ void VideoDecoder::convertRows(const uint8_t* yPlane, const uint8_t* uvPlane,
                 const uint8_t* uvRow = uvPlane + static_cast<size_t>(y / 2) * pitch;
                 const int u = uvRow[(x & ~1u)];
                 const int v = uvRow[(x & ~1u) + 1];
+                const int32_t yy=lookup.y[yRow[x]];
+                const uint32_t r=clampByte((yy+lookup.redV[v])>>8);
+                const uint32_t g=clampByte((yy+lookup.greenU[u]+lookup.greenV[v])>>8);
+                const uint32_t b=clampByte((yy+lookup.blueU[u])>>8);
                 out[x]=r|(g<<8)|(b<<16)|0xff000000u;
             }
         }
@@ -1300,7 +1538,9 @@ void VideoDecoder::conversionWorker(size_t index) {
         const uint32_t height = conversionHeight_;
         const uint32_t pitch = conversionPitch_;
         uint32_t* destination = conversionDestination_;
+        const VideoColorInfo color = conversionColor_;
         lock.unlock();
+        convertRows(yPlane, uvPlane, width, height, pitch, destination, color);
         if (index < conversionLastCpus_.size())
             conversionLastCpus_[index].store(sceKernelGetCurrentCpu(), std::memory_order_relaxed);
         lock.lock();

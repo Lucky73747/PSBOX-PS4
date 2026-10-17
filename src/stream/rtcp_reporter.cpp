@@ -33,6 +33,8 @@ void put32(std::vector<uint8_t>& b, uint32_t v) {
 
 }  // namespace
 
+RtcpReporter::RtcpReporter(uint32_t clockRate, uint32_t maxBitrate, VideoReceiveStats* videoStats)
+    : clockRate_(clockRate), videoStats_(videoStats), maxBitrate_(maxBitrate) {
     estimate_ = maxBitrate;
 }
 
@@ -120,6 +122,11 @@ void RtcpReporter::report(uint64_t now, const rtc::message_callback& send) {
     uint8_t fraction = 0;
     if (expectedInterval > 0 && lostInterval > 0)
         fraction = static_cast<uint8_t>(std::min<int64_t>(255, (lostInterval << 8) / expectedInterval));
+    if (videoStats_) {
+        videoStats_->rtcpLossPercentTenths.store(uint32_t(fraction) * 1000u / 256u, std::memory_order_relaxed);
+        videoStats_->rtcpJitterUs.store(clockRate_ ? static_cast<uint32_t>(jitter_ * 1000000.0 / clockRate_) : 0,
+                                        std::memory_order_relaxed);
+    }
     uint32_t dlsr = 0;
     if (lastSrArrivalUs_) dlsr = static_cast<uint32_t>((now - lastSrArrivalUs_) * 65536 / 1000000);
 

@@ -51,6 +51,15 @@ int Font::lineHeight(int px) const {
     return static_cast<int>(std::ceil((impl_->ascent - impl_->descent) * scale(px)));
 }
 
+int Font::cssPixelHeight(float cssPx) const {
+    return std::max(1,static_cast<int>(std::lround(cssPx *
+        stbtt_ScaleForMappingEmToPixels(&impl_->info,1.f) / scale(1))));
+}
+
+int Font::baselineOffset(int px) const {
+    return static_cast<int>(std::lround(impl_->ascent * scale(px)));
+}
+
 uint32_t nextCodepoint(std::string_view s, size_t& i) {
     auto c = static_cast<unsigned char>(s[i++]);
     if (c < 0x80) return c;

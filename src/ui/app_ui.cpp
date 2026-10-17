@@ -2043,6 +2043,8 @@ void AppUi::drawCentered(Canvas& c, const Font& f, const std::string& text, int 
 }
 
 void AppUi::drawBackground(Canvas& c) {
+    // The opaque full-screen gradient covers the canvas, so a separate clear
+    // would scan the entire 1920x1080 buffer a second time.
     c.gradientV({0, 0, kW, kH}, rgba(24, 28, 24), kBg);
 }
 
@@ -2180,12 +2182,15 @@ bool AppUi::drawHero(Canvas& c, uint64_t nowMs, const std::string& url, bool det
         heroSince_ = nowMs;
         heroShownAt_ = 0;
     }
+    auto current = heroUrl_.empty() ? nullptr : images_.get(heroUrl_, kW, kH, ImagePriority::Hero);
     if (current) {
         if (!heroShownAt_) heroShownAt_ = nowMs;
         uint64_t age = nowMs - heroShownAt_;
         // Arrived at once (cached): cross-fade from the previous art. Arrived
         // later: fade in from the plain background.
         bool crossFade = heroShownAt_ - heroSince_ < 150 && !prevHeroUrl_.empty();
+        auto previous = crossFade && age < kHeroFadeMs
+            ? images_.get(prevHeroUrl_, kW, kH, ImagePriority::Prefetch) : nullptr;
         if (previous) c.drawImage(*previous, 0, 0);
         uint8_t alpha = age >= kHeroFadeMs ? 255 : static_cast<uint8_t>(age * 255 / kHeroFadeMs);
         c.drawImage(*current, 0, 0, alpha);
@@ -2329,6 +2334,8 @@ void drawBag(Canvas& c, int cx, int cy, Color color, float size = 1.0f) {
 }  // namespace
 
 void AppUi::drawCard(Canvas& c, const GameTile& t, int x, int y, bool focused, bool gamePassBadge) {
+    if (auto img = images_.get(t.tileUrl, kCard, kCard,
+                               focused ? ImagePriority::Focused : ImagePriority::Visible)) {
         c.drawImage(*img, x, y, 255, 10);
     } else {
         c.fillRect({x, y, kCard, kCard}, kPlaceholder, 10);

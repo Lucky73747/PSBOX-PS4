@@ -159,6 +159,7 @@ bool H264Receiver::assemble(int64_t first, int64_t last, std::vector<uint8_t>& o
     for (int64_t s = first; s <= last; ++s) {
         auto it = packets_.find(s);
         if (it == packets_.end()) return false;
+        if (it->second.timestamp != timestamp) return false;
         const auto& p = it->second.payload;
         if (p.empty()) return false;
         uint8_t type = p[0] & 0x1F;
@@ -198,7 +199,42 @@ bool H264Receiver::assemble(int64_t first, int64_t last, std::vector<uint8_t>& o
     return !out.empty() && !fragmented;
 }
 
+H264Receiver::BoundaryStatus H264Receiver::findAccessUnitBoundary(
+        int64_t first, int64_t& last, int64_t& gap, bool& inferred) const {
+    last = -1;
+    gap = -1;
+    inferred = false;
+    auto firstPacket = packets_.find(first);
+    if (firstPacket == packets_.end()) {
+        if (first > highest_) return BoundaryStatus::Pending;
+        gap = first;
+        return BoundaryStatus::Gap;
+    }
+
+    const uint32_t timestamp = firstPacket->second.timestamp;
+    for (int64_t sequence = first;; ++sequence) {
+        auto packet = packets_.find(sequence);
+        if (packet == packets_.end()) {
+            if (sequence > highest_) return BoundaryStatus::Pending;
+            gap = sequence;
+            return BoundaryStatus::Gap;
+        }
+        if (packet->second.timestamp != timestamp) {
+            last = sequence - 1;
+            inferred = true;
+            return BoundaryStatus::Complete;
+        }
+        if (packet->second.marker) {
+            last = sequence;
+            return BoundaryStatus::Complete;
+        }
+        if (sequence >= highest_) return BoundaryStatus::Pending;
+    }
+}
+
 bool H264Receiver::resync(rtc::message_vector& out) {
+    // Find a packet boundary (RTP marker or timestamp change) followed by a
+    // complete key frame. A sequence gap invalidates only the candidate AU.
     for (auto it = packets_.begin(); it != packets_.end(); ++it) {
         auto prev = packets_.find(it->first - 1);
         if (prev == packets_.end()) {
@@ -227,11 +263,23 @@ bool H264Receiver::resync(rtc::message_vector& out) {
                   ((payload[1] & 0x1f) == 5 && (payload[2] & 0x80))));
             if (!start) continue;
         } else if (!prev->second.marker && prev->second.timestamp == it->second.timestamp) continue;
+        int64_t last = -1, gap = -1;
+        bool inferred = false;
+        const BoundaryStatus boundary = findAccessUnitBoundary(it->first, last, gap, inferred);
+        if (boundary == BoundaryStatus::Pending) return false;
+        if (boundary == BoundaryStatus::Gap) {
             // Skip past the hole and inspect later frame boundaries.
+            auto afterGap = packets_.upper_bound(gap);
+            if (afterGap == packets_.begin()) continue;
+            it = std::prev(afterGap);
             continue;
         }
         std::vector<uint8_t> frame;
         bool key = false;
+        if (assemble(it->first, last, frame, key) && (key || parameterOnly(frame))) {
+            if (inferred && ((++inferredBoundaryCount_ & 0xffu) == 1u))
+                XC_LOGI("h264_au_boundary source=timestamp_change inferred_count=%llu",
+                        static_cast<unsigned long long>(inferredBoundaryCount_));
             nextSeq_ = it->first;
             packets_.erase(packets_.begin(), it);  // older junk
             for (auto e = missing_.begin(); e != missing_.end() && e->first < nextSeq_;) e = missing_.erase(e);
@@ -247,6 +295,10 @@ void H264Receiver::drain(uint64_t now, rtc::message_vector& out, const rtc::mess
         if (nextSeq_ < 0) {
             if (!resync(out)) return;
         }
+        int64_t last = -1, hole = -1;
+        bool inferred = false;
+        const BoundaryStatus boundary = findAccessUnitBoundary(nextSeq_, last, hole, inferred);
+        if (boundary == BoundaryStatus::Pending) return;
         if (hole >= 0) {
             if (hole > highest_) return;  // just not here yet
             auto m = missing_.find(hole);
@@ -262,8 +314,23 @@ void H264Receiver::drain(uint64_t now, rtc::message_vector& out, const rtc::mess
             askKeyframe(send);
             continue;
         }
+        if (boundary != BoundaryStatus::Complete) return;
+        if (inferred && ((++inferredBoundaryCount_ & 0xffu) == 1u))
+            XC_LOGI("h264_au_boundary source=timestamp_change inferred_count=%llu",
+                    static_cast<unsigned long long>(inferredBoundaryCount_));
         std::vector<uint8_t> frame;
         bool key = false;
+        const bool ok = assemble(nextSeq_, last, frame, key);
+        const uint32_t ts = packets_[last].timestamp;
+        for (auto e = packets_.begin(); e != packets_.end() && e->first <= last;) e = packets_.erase(e);
+        for (auto e = missing_.begin(); e != missing_.end() && e->first <= last;) e = missing_.erase(e);
+        nextSeq_ = last + 1;
+        if (!ok) {
+            ++stats_.framesDropped;
+            waitingKeyframe_ = true;
+            askKeyframe(send);
+            continue;
+        }
         if (waitingKeyframe_ && !key && !parameterOnly(frame)) {
             ++stats_.framesDropped;  // would decode against lost references
             continue;

@@ -25,6 +25,9 @@ public:
     bool load(const std::string& path);
 
     int lineHeight(int px) const;
+    // Convert CSS em pixels to this renderer's ascent-to-descent pixel height.
+    int cssPixelHeight(float cssPx) const;
+    int baselineOffset(int px) const;
     // The `y` to draw at so that capital letters sit centred in a box of
     // height `boxH` starting at `boxY` (badges, keys, buttons).
     int centeredY(int boxY, int boxH, int px) const;

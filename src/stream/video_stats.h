@@ -26,6 +26,8 @@ struct VideoReceiveStats {
     std::atomic<uint64_t> rembLastRequestAtMs{0};
     std::atomic<uint32_t> rembLastRequestedBitrate{0};
     std::atomic<uint64_t> receiveRateAboveCapSamples{0};
+    std::atomic<uint32_t> rtcpLossPercentTenths{0};
+    std::atomic<uint32_t> rtcpJitterUs{0};
 };
 
 }  // namespace xc::stream

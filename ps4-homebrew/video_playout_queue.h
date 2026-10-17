@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include "video_color.h"
 #include <array>
 #include <vector>
 #include <cstdint>
@@ -17,10 +18,16 @@ public:
         if (resetStats) uploaded = replaced = repeated = primeWaits = 0;
         lastSequence = 0;
     }
+    void push(std::vector<uint8_t>& packed, uint32_t width, uint32_t height, uint64_t sequence,
+              const VideoColorInfo& color) {
         if (count_ == capacity) { head_ = (head_ + 1) % capacity; --count_; ++replaced; }
         auto& frame = frames_[(head_ + count_) % capacity];
+        frame.bytes.swap(packed); frame.width = width; frame.height = height;
+        frame.sequence = sequence; frame.color = color;
         ++count_;
     }
+    bool copyNext(uint8_t* destination, size_t bytes, uint32_t& width, uint32_t& height,
+                  VideoColorInfo& color, uint32_t fps, uint32_t waitFrames = 0) {
         const bool smooth = waitFrames && fps == 60;
         if (smooth != smooth_) { primed_ = false; smooth_ = smooth; }
         if (!count_) { if (primed_) ++repeated; primed_ = false; return false; }
@@ -32,9 +39,12 @@ public:
         const auto& frame = frames_[head_];
         if (!destination || bytes < frame.bytes.size()) return false;
         std::memcpy(destination, frame.bytes.data(), frame.bytes.size());
+        width = frame.width; height = frame.height; color = frame.color; lastSequence = frame.sequence;
         head_ = (head_ + 1) % capacity; --count_; ++uploaded;
         return true;
     }
+    bool takeNext(std::vector<uint8_t>& packed, size_t bytes, uint32_t& width, uint32_t& height,
+                  VideoColorInfo& color, uint32_t fps, uint32_t waitFrames = 0) {
         const bool smooth = waitFrames && fps == 60;
         if (smooth != smooth_) { primed_ = false; smooth_ = smooth; }
         if (!count_) { if (primed_) ++repeated; primed_ = false; return false; }
@@ -42,6 +52,7 @@ public:
         if (waitFrames && fps == 60 && !primed_ && count_ < 2) { ++primeWaits; return false; }
         auto& frame = frames_[head_];
         if (bytes < frame.bytes.size()) return false;
+        packed.swap(frame.bytes); width = frame.width; height = frame.height; color = frame.color;
         lastSequence = frame.sequence; primed_ = true;
         head_ = (head_ + 1) % capacity; --count_; ++uploaded;
         return true;
@@ -49,6 +60,12 @@ public:
     size_t size() const { return count_; }
     uint64_t uploaded = 0, replaced = 0, repeated = 0, primeWaits = 0, lastSequence = 0;
 private:
+    struct Frame {
+        std::vector<uint8_t> bytes;
+        uint32_t width = 0, height = 0;
+        uint64_t sequence = 0;
+        VideoColorInfo color{};
+    };
     std::array<Frame, capacity> frames_;
     size_t head_ = 0, count_ = 0;
     bool primed_ = false, smooth_ = false;

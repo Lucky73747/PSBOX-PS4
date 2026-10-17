@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <vector>
 #include <unordered_map>
+#include <functional>
 
 namespace xc::ui {
 
@@ -74,6 +75,7 @@ public:
     void drawMask(const uint8_t* mask, int mw, int mh, int stride, int x, int y, Color c);
 
 private:
+    void drawPrimitiveMask(Rect bounds, Color color, const std::function<void(Canvas&)>& draw);
     void blend(uint32_t& dst, Color src, uint32_t alpha /*0..255*/) const;
     // Coverage (0..255) of a rounded rectangle at pixel (px, py).
     static uint32_t cornerCoverage(Rect r, int radius, int px, int py);

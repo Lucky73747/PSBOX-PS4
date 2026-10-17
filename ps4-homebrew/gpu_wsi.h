@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include "video_color.h"
 
 namespace xc::ui { class Canvas; }
 namespace xc::ps4 {
@@ -49,7 +50,11 @@ struct CanvasFrameUpdateResult {
     bool videoActive = false;
     const xc::ui::Canvas* gpuUi = nullptr;
     uint32_t targetFps = 60;
+    uint32_t upscaler = 1; // 0 bilinear, 1 FSR1 EASU RGB + RCAS, 2 native 1:1 pixels
     uint32_t rcasSharpness = 2; // 0..4, half-stop attenuation each
+    bool nativeRcas = false; // Experimental: RCAS at native 1080p source/output.
+    uint32_t fsrScaleFactor = 1; // 1x output resolution, 2x intermediate EASU then downsample.
+    bool requested1080p = false; // Guard experimental 2x when the user selected 720p.
 };
 
 // Reports whether the CPU canvas changed and whether a newly decoded video
@@ -58,6 +63,7 @@ using CanvasFrameUpdate = CanvasFrameUpdateResult (*)(uint32_t* rgba, void* user
                                                        const PresentationStats& previousWindow,
                                                        bool gpuVideoEnabled);
 using Nv12FrameUpload = bool (*)(void* userData, uint8_t* destination, size_t capacity,
+                                  uint32_t* width, uint32_t* height, VideoColorInfo* color);
 
 // Starts Mesa Orbis WSI through VK_EXT_headless_surface and keeps presenting
 // the supplied RGBA UI canvas. When the driver supports the required Vulkan

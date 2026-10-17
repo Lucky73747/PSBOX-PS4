@@ -119,6 +119,20 @@ void Canvas::strokeRect(Rect r, Color c, int t, int radius) {
 void Canvas::gradientV(Rect r, Color top, Color bottom) {
     Rect b = intersect(r, clip_);
     if (b.w <= 0 || b.h <= 0) return;
+    // Opaque gradients replace every destination pixel, so blending each
+    // pixel is wasted work. This is the full-screen menu background and was
+    // taking roughly 90 ms per software-rendered UI frame on PS4.
+    if (alphaOf(top) == 255 && alphaOf(bottom) == 255) {
+        for (int y = b.y; y < b.y + b.h; ++y) {
+            uint32_t t = r.h > 1 ? static_cast<uint32_t>((y - r.y) * 255 / (r.h - 1)) : 0;
+            Color c = 0;
+            for (int s = 0; s < 24; s += 8)
+                c |= lerp8((top >> s) & 0xFF, (bottom >> s) & 0xFF, t) << s;
+            uint32_t* row = &px_[static_cast<size_t>(y) * w_ + b.x];
+            std::fill_n(row, b.w, c | 0xFF000000u);
+        }
+        return;
+    }
     for (int y = b.y; y < b.y + b.h; ++y) {
         uint32_t t = r.h > 1 ? static_cast<uint32_t>((y - r.y) * 255 / (r.h - 1)) : 0;
         Color c = 0;
@@ -151,6 +165,10 @@ void Canvas::gradientH(Rect r, Color left, Color right) {
 void Canvas::fillCircle(float cx, float cy, float radius, Color c) {
     Rect r{static_cast<int>(cx - radius - 1), static_cast<int>(cy - radius - 1), static_cast<int>(radius * 2 + 3),
            static_cast<int>(radius * 2 + 3)};
+    if (gpuUi_) {
+        drawPrimitiveMask(r, c, [=](Canvas& m) { m.fillCircle(cx-r.x, cy-r.y, radius, rgba(255,255,255)); });
+        return;
+    }
     Rect b = intersect(r, clip_);
     uint32_t a = alphaOf(c);
     for (int y = b.y; y < b.y + b.h; ++y)
@@ -165,6 +183,10 @@ void Canvas::strokeCircle(float cx, float cy, float radius, float thickness, Col
     float outer = radius + thickness / 2, inner = radius - thickness / 2;
     Rect r{static_cast<int>(cx - outer - 1), static_cast<int>(cy - outer - 1), static_cast<int>(outer * 2 + 3),
            static_cast<int>(outer * 2 + 3)};
+    if (gpuUi_) {
+        drawPrimitiveMask(r, c, [=](Canvas& m) { m.strokeCircle(cx-r.x, cy-r.y, radius, thickness, rgba(255,255,255)); });
+        return;
+    }
     Rect b = intersect(r, clip_);
     uint32_t a = alphaOf(c);
     for (int y = b.y; y < b.y + b.h; ++y)
@@ -181,6 +203,10 @@ void Canvas::strokeArc(float cx, float cy, float radius, float thickness, float 
     float outer = radius + thickness / 2, inner = radius - thickness / 2;
     Rect r{static_cast<int>(cx - outer - 1), static_cast<int>(cy - outer - 1), static_cast<int>(outer * 2 + 3),
            static_cast<int>(outer * 2 + 3)};
+    if (gpuUi_) {
+        drawPrimitiveMask(r, c, [=](Canvas& m) { m.strokeArc(cx-r.x, cy-r.y, radius, thickness, start, sweep, rgba(255,255,255)); });
+        return;
+    }
     Rect b = intersect(r, clip_);
     uint32_t a = alphaOf(c);
     start = std::fmod(start, 2 * kPi);
@@ -207,6 +233,10 @@ void Canvas::line(float x0, float y0, float x1, float y1, float thickness, Color
     Rect r{static_cast<int>(std::min(x0, x1) - half - 1), static_cast<int>(std::min(y0, y1) - half - 1),
            static_cast<int>(std::fabs(x1 - x0) + thickness + 3), static_cast<int>(std::fabs(y1 - y0) + thickness + 3)};
     Rect b = intersect(r, clip_);
+    if (gpuUi_) {
+        drawPrimitiveMask(r, c, [=](Canvas& m) { m.line(x0-r.x, y0-r.y, x1-r.x, y1-r.y, thickness, rgba(255,255,255)); });
+        return;
+    }
     float vx = x1 - x0, vy = y1 - y0, len2 = vx * vx + vy * vy;
     uint32_t a = alphaOf(c);
     for (int y = b.y; y < b.y + b.h; ++y)
@@ -217,6 +247,17 @@ void Canvas::line(float x0, float y0, float x1, float y1, float thickness, Color
             uint32_t cov = clampCoverage(half + 0.5f - std::sqrt(dx * dx + dy * dy));
             if (cov) blend(px_[static_cast<size_t>(y) * w_ + x], c, (a * cov + 127) / 255);
         }
+}
+
+void Canvas::drawPrimitiveMask(Rect bounds, Color color, const std::function<void(Canvas&)>& draw) {
+    if (bounds.w <= 0 || bounds.h <= 0 || alphaOf(color) == 0) return;
+    Canvas mask(bounds.w, bounds.h);
+    mask.clearTransparent();
+    draw(mask);
+    std::vector<uint8_t> coverage(static_cast<size_t>(bounds.w) * bounds.h);
+    const uint32_t* pixels = mask.data();
+    for (size_t i = 0; i < coverage.size(); ++i) coverage[i] = static_cast<uint8_t>(pixels[i] >> 24);
+    drawMask(coverage.data(), bounds.w, bounds.h, bounds.w, bounds.x, bounds.y, color);
 }
 
 void Canvas::drawImage(const Image& img, int x, int y, uint8_t opacity, int radius) {

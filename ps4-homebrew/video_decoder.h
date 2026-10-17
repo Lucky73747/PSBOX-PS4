@@ -2,6 +2,7 @@
 #pragma once
 
 #include "video_playout_queue.h"
+#include "video_color.h"
 #include <cstddef>
 #include <cstdint>
 #include <array>
@@ -70,6 +71,10 @@ public:
     void setGpuVideoEnabled(bool enabled) { gpuVideoEnabled_.store(enabled, std::memory_order_relaxed); }
     void setPlayoutDelayFrames(uint32_t frames) { playoutDelayFrames_.store(frames ? 1 : 0); }
     void setPresentationFps(uint32_t fps) { presentationFps_.store(fps == 30 ? 30 : 60, std::memory_order_relaxed); }
+    bool copyLatestToCanvas(uint32_t* destination, uint32_t width, uint32_t height,
+                            bool native1to1 = false);
+    bool copyLatestNv12To(uint8_t* destination, size_t capacity, uint32_t& width, uint32_t& height,
+                          VideoColorInfo& color);
     bool hasFrame() const;
     VideoPerformanceSnapshot performanceSnapshot() const;
 
@@ -89,9 +94,13 @@ private:
     bool resetDecoder(const char* reason);
     bool decode(const AccessUnit& accessUnit, bool publishOutput, size_t queueDepth);
     bool publishNv12(const void* data, size_t available, uint32_t width,
+                     uint32_t paddedHeight, uint32_t pitchBytes, uint32_t format,
+                     const VideoColorInfo& color);
     void conversionWorker(size_t index);
     static void* conversionWorkerEntry(void* opaque);
     void convertRows(const uint8_t* yPlane, const uint8_t* uvPlane, uint32_t width,
+                     uint32_t height, uint32_t pitch, uint32_t* destination,
+                     const VideoColorInfo& color);
     void stopConversionWorkers();
 
     std::atomic<uint32_t> diagnosticStage_{0};
@@ -116,6 +125,7 @@ private:
     uint32_t scaleSourceHeight_ = 0;
     uint32_t scaleOutputWidth_ = 0;
     uint32_t scaleOutputHeight_ = 0;
+    bool scaleNative1to1_ = false;
     uint32_t latestWidth_ = 0;
     uint32_t latestHeight_ = 0;
     std::atomic<uint64_t> latestSequence_{0};
@@ -177,6 +187,7 @@ private:
     uint32_t conversionHeight_ = 0;
     uint32_t conversionPitch_ = 0;
     uint32_t* conversionDestination_ = nullptr;
+    VideoColorInfo conversionColor_{};
     std::unique_ptr<DecoderState> decoderState_;
 };
 

@@ -12,6 +12,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 list(PREPEND CMAKE_MODULE_PATH "${_xc_repo_root}/cmake/modules")
 
+# Opus is built static before libdatachannel enables BUILD_SHARED_LIBS globally.
+set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(OPUS_DRED OFF CACHE BOOL "" FORCE)
+set(OPUS_OSCE OFF CACHE BOOL "" FORCE)
+set(_xc_build_shared_libs_before_opus ${BUILD_SHARED_LIBS})
+set(BUILD_SHARED_LIBS OFF)
+add_subdirectory("${_xc_repo_root}/deps/opus" "${CMAKE_BINARY_DIR}/opus" EXCLUDE_FROM_ALL)
+set(BUILD_SHARED_LIBS ${_xc_build_shared_libs_before_opus})
+
 # Build the existing WebRTC client and its pinned crypto/ICE/SCTP dependencies
 # for Orbis. The standalone bootstrap intentionally did not pull these into
 # its link graph before the video transport milestone.
@@ -76,6 +87,9 @@ endif()
 
 add_executable(xcloud_homebrew
   main.cpp
+  stream_menu_ui.cpp
+  stream_stats_ui.cpp
+  audio_player.cpp
   gpu_wsi.cpp
   video_decoder.cpp
   random_compat.c
@@ -114,6 +128,7 @@ target_include_directories(xcloud_homebrew PRIVATE
   "${XC_PS4_SDL3_BUILD}/include-revision"
   ../extern/stb
   ../extern/qrcodegen
+  "${_xc_repo_root}/deps/opus/include"
   "${_vkloader_dir}"
   "${_xc_repo_root}/deps/libdatachannel/include"
   "${ORBIS_MESA_SRC}/include")
@@ -125,6 +140,7 @@ target_link_libraries(xcloud_homebrew PRIVATE
   "${XC_PS4_SDL3_BUILD}/libSDL3.a"
   ${_zlib_archive}
   datachannel-static
+  opus
   -lSceGnmDriver -lSceVideoOut -lSceSysmodule -lSceUserService -lScePad -lSceAudioOut
   -lSceNet -lSceNetCtl -lSceSsl -lSceHttp -lSceRandom)
 
@@ -143,6 +159,22 @@ if(COMMAND ps4_create_pkg)
   configure_file("${CMAKE_CURRENT_LIST_DIR}/../LICENSE" "${_assets}/licenses/LICENSE" COPYONLY)
   configure_file("${CMAKE_CURRENT_LIST_DIR}/../THIRD_PARTY_NOTICES.md" "${_assets}/licenses/THIRD_PARTY_NOTICES.md" COPYONLY)
   configure_file("${CMAKE_CURRENT_LIST_DIR}/../extern/fsr1/LICENSE.txt" "${_assets}/licenses/AMD-FSR1.txt" COPYONLY)
+  configure_file("${_xc_repo_root}/deps/opus/COPYING" "${_assets}/licenses/Opus-COPYING" COPYONLY)
+  # Retain the public notice collection in every newly generated package.
+  # This does not replace the corresponding-source/external SDK review.
+  file(GLOB_RECURSE _xc_public_notices CONFIGURE_DEPENDS
+    RELATIVE "${_xc_repo_root}/licenses" "${_xc_repo_root}/licenses/*")
+  set(_xc_notice_extra_files)
+  foreach(_notice IN LISTS _xc_public_notices)
+    if(NOT IS_DIRECTORY "${_xc_repo_root}/licenses/${_notice}")
+      get_filename_component(_notice_dir "${_notice}" DIRECTORY)
+      file(MAKE_DIRECTORY "${_assets}/licenses/third-party/${_notice_dir}")
+      configure_file("${_xc_repo_root}/licenses/${_notice}"
+        "${_assets}/licenses/third-party/${_notice}" COPYONLY)
+      list(APPEND _xc_notice_extra_files
+        "${_assets}/licenses/third-party/${_notice}:licenses/third-party/${_notice}")
+    endif()
+  endforeach()
   ps4_create_pkg(xcloud_homebrew
     TITLE_ID XCHM00001
     CONTENT_LABEL PSBOXPS4
@@ -154,4 +186,7 @@ if(COMMAND ps4_create_pkg)
       "${_assets}/fonts/OFL.txt:assets/fonts/OFL.txt"
       "${_assets}/licenses/AMD-FSR1.txt:licenses/AMD-FSR1.txt"
       "${_assets}/licenses/LICENSE:licenses/LICENSE"
+      "${_assets}/licenses/Opus-COPYING:licenses/Opus-COPYING"
+      "${_assets}/licenses/THIRD_PARTY_NOTICES.md:licenses/THIRD_PARTY_NOTICES.md"
+      ${_xc_notice_extra_files})
 endif()

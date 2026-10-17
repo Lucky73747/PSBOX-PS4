@@ -51,6 +51,21 @@ struct SctpTraceRecord {
     char line[kSctpTraceLineSize]{};
 };
 
+struct ElapsedMs {
+    bool available = false;
+    uint64_t value = 0;
+};
+
+ElapsedMs elapsedSince(uint64_t now, uint64_t then) {
+    if (!then || then > now) return {};
+    return {true, now - then};
+}
+
+bool intervalElapsed(uint64_t now, uint64_t then, uint64_t intervalMs) {
+    const ElapsedMs elapsed = elapsedSince(now, then);
+    return elapsed.available && elapsed.value >= intervalMs;
+}
+
 std::mutex gSctpTraceMutex;
 std::array<SctpTraceRecord, kSctpTraceCapacity> gSctpTrace{};
 size_t gSctpTraceHead = 0;
@@ -219,6 +234,8 @@ struct StreamSession::Impl {
     std::atomic<uint32_t> inputSequence{1};
     std::atomic<bool> keyframeRequested{false};
     uint64_t lastKeepaliveMs = 0;
+    uint64_t lastKeyframeMs = 0, lastRecoveryDiagnosticMs = 0;
+    std::atomic<uint64_t> lastControlRecoveryMs{0};
     VideoReceiveStats videoStats;
     std::shared_ptr<RtcpReporter> videoReporter;
     std::atomic<int> otherInputReports{0};
@@ -678,6 +695,7 @@ struct StreamSession::Impl {
             },
             videoStats);
         videoReceiver->setSimulatedLoss(opt.simulatedVideoLoss);
+        videoReporter = std::make_shared<RtcpReporter>(90000, opt.maxBitrate, &videoStats);
         videoReceiver->addToChain(videoReporter);
         video->setMediaHandler(videoReceiver);
         video->onFrame([this](rtc::binary data, rtc::FrameInfo info) {
@@ -961,9 +979,24 @@ struct StreamSession::Impl {
 #if defined(__ORBIS__)
         // Recovery must remain available when the input/control SCTP path is
         // congested. PLI goes over SRTCP and does not enter usrsctp's locks.
+        const uint64_t lastAu = videoStats.lastAccessUnitAtMs.load();
+        const uint64_t readyAt = streamReadyAtMs.load();
+        const uint64_t origin = lastAu ? lastAu : readyAt;
         const uint64_t now = platform::nowMs();
+        const ElapsedMs age = elapsedSince(now, origin);
+        const bool stalled = age.available && age.value >= 2000;
         if (video && video->requestKeyframe()) {
             XC_LOGI("video_recovery keyframe_path=rtcp_pli");
+            if (!stalled) return;
+
+            uint64_t previous = lastControlRecoveryMs.load(std::memory_order_relaxed);
+            for (;;) {
+                if (previous && !intervalElapsed(now, previous, 2000)) return;
+                if (lastControlRecoveryMs.compare_exchange_weak(previous, now,
+                        std::memory_order_relaxed, std::memory_order_relaxed)) break;
+            }
+            XC_LOGW("video_recovery keyframe_path=control_fallback age_available=1 au_age_ms=%llu",
+                    (unsigned long long)age.value);
         }
 #endif
         json::Value v = json::Value::object();
@@ -975,17 +1008,39 @@ struct StreamSession::Impl {
     void tick() {
         if (!open) return;
         const uint64_t readyAt = streamReadyAtMs.load();
+        const uint64_t lastAu = videoStats.lastAccessUnitAtMs.load();
+        const uint64_t origin = lastAu ? lastAu : readyAt;
+        // Sample the clock after the atomics. A concurrent receiver update can
+        // then appear slightly stale, but cannot make the timestamp look future.
+        const uint64_t now = platform::nowMs();
+        const ElapsedMs age = elapsedSince(now, origin);
+        if (readyAt && !firstVideoAccessUnit.load() &&
+            intervalElapsed(now, readyAt, 10000) &&
             !firstVideoTimeoutLogged.exchange(true))
             logIceDiagnostic("STAGE L6 TIMEOUT event=first_depacketized_access_unit timeout_ms=10000");
+        if (intervalElapsed(now, lastKeepaliveMs, 30000)) {
             lastKeepaliveMs = now;
             std::string err;
             if (!gssv.keepalive(err)) XC_LOGW("%s", err.c_str());
         }
+        const bool noProgress = age.available && age.value >= 1000;
+        const bool ageUnavailable = origin && !age.available;
+        const bool diagnosticIntervalElapsed = !lastRecoveryDiagnosticMs ||
+            intervalElapsed(now, lastRecoveryDiagnosticMs, 2000);
+        if ((noProgress || ageUnavailable) && diagnosticIntervalElapsed) {
             lastRecoveryDiagnosticMs = now;
+            XC_LOGW("video_recovery_progress phase=%s age_available=%u au_age_ms=%llu no_progress=%u au_total=%llu idr_at_ms=%llu buffered=%llu missing=%llu waiting_idr=%u",
+                lastAu ? "running" : "startup", age.available ? 1u : 0u,
+                (unsigned long long)(age.available ? age.value : 0), noProgress ? 1u : 0u,
                 (unsigned long long)videoStats.framesOut.load(), (unsigned long long)videoStats.lastKeyframeAtMs.load(),
                 (unsigned long long)videoStats.bufferedPackets.load(), (unsigned long long)videoStats.missingPackets.load(),
                 videoStats.waitingKeyframe.load() ? 1u : 0u);
         }
+        const bool keyframeIntervalElapsed = intervalElapsed(now, lastKeyframeMs, 1000);
+        const bool recoveryDue = (noProgress || keyframeRequested.load(std::memory_order_acquire)) && keyframeIntervalElapsed;
+        const bool configuredIntervalElapsed = opt.keyframeIntervalSec > 0 &&
+            intervalElapsed(now, lastKeyframeMs, static_cast<uint64_t>(opt.keyframeIntervalSec) * 1000u);
+        if (recoveryDue || configuredIntervalElapsed) {
             keyframeRequested.store(false, std::memory_order_release);
             lastKeyframeMs = now;
             requestKeyframe();

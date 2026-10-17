@@ -16,6 +16,8 @@ struct XcloudLoginInfo {
     std::string region;
     size_t regionCount = 0;
     std::vector<xc::xcloud::Title> titles;
+    // Small PS4 display subset, maintained incrementally while pages arrive.
+    std::vector<xc::xcloud::Title> displayTitles;
     std::shared_ptr<xc::xcloud::GssvClient> client;
     std::string catalogWarning;
 };

@@ -39,6 +39,7 @@ public:
     void setSimulatedLoss(int percent) { simulatedLoss_ = percent; }
 
 private:
+    enum class BoundaryStatus { Complete, Pending, Gap };
     struct Packet {
         uint32_t timestamp = 0;
         bool marker = false;
@@ -56,6 +57,8 @@ private:
     void sendNack(const std::vector<int64_t>& seqs, const rtc::message_callback& send);
     void sendPli(const rtc::message_callback& send);
     void askKeyframe(const rtc::message_callback& send);
+    BoundaryStatus findAccessUnitBoundary(int64_t first, int64_t& last,
+                                          int64_t& gap, bool& inferred) const;
     // Emits every complete frame from nextSeq_ on; gives up on holes older
     // than the retransmission wait.
     void drain(uint64_t now, rtc::message_vector& out, const rtc::message_callback& send);
@@ -72,6 +75,7 @@ private:
     std::atomic<uint32_t> mediaSsrc_{0};
     uint64_t lastKeyframeRequestMs_ = 0;
     int simulatedLoss_ = 0;
+    uint64_t inferredBoundaryCount_ = 0;
     uint32_t lossState_ = 12345;
     std::map<uint16_t, std::vector<uint8_t>> held_;                     // simulated loss
     std::vector<std::pair<uint64_t, std::vector<uint8_t>>> redeliver_;  // (due, packet)
