@@ -54,6 +54,7 @@ constexpr Column kEnglish = {
     "You're in the queue. Estimated wait: %s",        // InQueue
     "Connecting...",                                  // Connecting
     "Starting the stream...",                         // StartingStream
+    "Touchpad: ↓ this menu · ↑ Guide button",            // MenuGestureHint
     "Stream ended",                                   // StreamEnded
     "Something went wrong",                           // ErrorTitle
     "Signed in as %s",                                // SignedInAs
@@ -91,6 +92,7 @@ constexpr Column kEnglish = {
     "Available to buy",                              // AvailableToBuy
     "BUY",                                           // BuyBadge
     "Buy this game to play it in the cloud",         // BuyToPlay
+    "Buy it on the service website or in the service app; it then shows up in My games.", // BuyHint
     "Scan to open the store page",                   // ScanToBuy
     "Search in %s",                                  // SearchIn
     "FREE",                                          // Free
@@ -146,6 +148,7 @@ constexpr Column kEnglish = {
     "Upscaling",                                     // MenuUpscaler
     "AI (Anime4K)",                                  // UpscalerAi
     "Free to play",                                  // FreeToPlay
+    "Get it once, free, on the service website or in the service app (scan the code with your phone), then press Play.", // FreeHint
     "Scan to get it free",                          // ScanToGet
     "%s is not on your account yet. It is free: scan the code on its page, choose Get, then try again (it can take a minute).", // NoEntitlementFree
     "Your account can't play %s: it is not in your subscription or not bought.", // NoEntitlement
@@ -154,14 +157,22 @@ constexpr Column kEnglish = {
     "Sleeping",                                      // ConsoleSleeping
     "Off",                                           // ConsoleOff
     "Looking for your consoles...",                  // ConsolesLoading
+    "No console found yet",                       // NoConsoles
+    "Play your own console here: its screen, games and apps.", // ConsolesHint
+    "Waking up your console...",                        // WakingConsole
     "%s did not answer. Check that Remote features are on and the power mode is Sleep, or turn it on, then try again.", // WakeFailed
+    "On your console, sign in with this same Microsoft account.", // ConsoleStep1
     "Settings > Devices & connections > Remote features: turn on remote features.", // ConsoleStep2
     "Settings > General > Power options: choose Sleep, so it wakes up by itself.", // ConsoleStep3
     "Scan for Microsoft's help",                     // ScanForHelp
     "Search again",                                  // SearchAgain
+    "Guide button",                                   // MenuXboxButton
     "End the stream",                                // MenuEndStream
+    "The stream was ended on the console",               // EndedOnXbox
     "Another device took over the stream",            // EndedByOtherDevice
+    "The console was turned off",                        // EndedXboxOff
     "%s got the request but its Remote Play didn't start. Restart it: hold the power button on the console for 10 seconds, turn it back on, then try again.", // StreamingStuck
+    "Touchpad: swipe ↓ for the menu, ↑ for the Guide button", // GestureHint
     "FSR + clean-up",                                // UpscalerFsrClean
     "AI + clean-up",                                 // UpscalerAiClean
     "Auto (%s)",                                     // DebandAuto
@@ -254,6 +265,7 @@ constexpr Column kPortugueseBR = {
     "Você está na fila. Espera estimada: %s",
     "Conectando...",
     "Iniciando o streaming...",
+    "Touchpad: ↓ este menu · ↑ botão Guia",
     "Streaming encerrado",
     "Algo deu errado",
     "Conectado como %s",
@@ -291,6 +303,7 @@ constexpr Column kPortugueseBR = {
     "Disponíveis para comprar",
     "COMPRAR",
     "Compre este jogo para jogá-lo na nuvem",
+    "Compre em site do serviço ou no app do serviço; depois ele aparece em Meus jogos.",
     "Escaneie para abrir a página da loja",
     "Pesquisar em %s",
     "GRÁTIS",
@@ -346,6 +359,7 @@ constexpr Column kPortugueseBR = {
     "Ampliação",
     "IA (Anime4K)",
     "Grátis para jogar",
+    "Pegue uma vez, de graça, no site do serviço ou no app do serviço (escaneie o código com o celular) e depois aperte Jogar.",
     "Escaneie para pegar grátis",
     "%s ainda não está na sua conta. É grátis: escaneie o código na página do jogo, escolha Obter e tente de novo (pode levar um minuto).",
     "Sua conta não pode jogar %s: não está na sua assinatura ou não foi comprado.",
@@ -354,13 +368,22 @@ constexpr Column kPortugueseBR = {
     "Em espera",
     "Desligado",
     "Procurando seus consoles...",
+    "Nenhum console encontrado ainda",
+    "Jogue no seu próprio console por aqui: a tela, os jogos e os apps dele.",
+    "Ligando o seu console...",
     "%s não respondeu. Confira se os Recursos remotos estão ativos e o modo de energia é Suspensão, ou ligue o console, e tente de novo.",
+    "No seu console, entre com esta mesma conta Microsoft.",
     "Configurações > Dispositivos e conexões > Recursos remotos: ative os recursos remotos.",
     "Configurações > Geral > Opções de energia: escolha Suspensão, para ele acordar sozinho.",
     "Escaneie para a ajuda da Microsoft",
     "Procurar de novo",
+    "Botão Guia",
     "Encerrar transmissão",
+    "A transmissão foi encerrada no console",
     "Outro aparelho assumiu a transmissão",
+    "O console foi desligado",
+    "%s recebeu o pedido, mas o jogo remoto dele não iniciou. Reinicie o console: segure o botão de ligar do console por 10 segundos, ligue de novo e tente outra vez.",
+    "Touchpad: deslize ↓ para o menu, ↑ para o botão Guia",
     "FSR + limpeza",
     "IA + limpeza",
     "Auto (%s)",
@@ -453,6 +476,7 @@ constexpr Column kSpanish = {
     "Estás en la cola. Espera estimada: %s",
     "Conectando...",
     "Iniciando el streaming...",
+    "Panel táctil: ↓ este menú · ↑ botón Guía",
     "Streaming finalizado",
     "Algo salió mal",
     "Sesión iniciada como %s",
@@ -490,6 +514,7 @@ constexpr Column kSpanish = {
     "Disponibles para comprar",
     "COMPRAR",
     "Compra este juego para jugarlo en la nube",
+    "Cómpralo en sitio del servicio o en la app del servicio; luego aparecerá en Mis juegos.",
     "Escanea para abrir la página de la tienda",
     "Buscar en %s",
     "GRATIS",
@@ -545,6 +570,7 @@ constexpr Column kSpanish = {
     "Escalado",
     "IA (Anime4K)",
     "Gratis para jugar",
+    "Consíguelo una vez, gratis, en sitio del servicio o en la app del servicio (escanea el código con el móvil) y luego pulsa Jugar.",
     "Escanea para conseguirlo gratis",
     "%s aún no está en tu cuenta. Es gratis: escanea el código en su página, elige Obtener y vuelve a intentarlo (puede tardar un minuto).",
     "Tu cuenta no puede jugar a %s: no está en tu suscripción o no lo has comprado.",
@@ -553,14 +579,22 @@ constexpr Column kSpanish = {
     "En reposo",
     "Apagada",
     "Buscando tus consolas...",
+    "Aún no se encontró ninguna consola",
+    "Juega en tu propio console desde aquí: su pantalla, juegos y aplicaciones.",
+    "Encendiendo tu consola...",
     "%s no respondió. Comprueba que las Funciones remotas estén activadas y el modo de energía sea Suspensión, o enciéndela, y vuelve a intentarlo.",
+    "En tu consola, inicia sesión con esta misma cuenta Microsoft.",
     "Configuración > Dispositivos y conexiones > Funciones remotas: activa las funciones remotas.",
     "Configuración > General > Opciones de energía: elige Suspensión, para que se encienda sola.",
     "Escanea para ver la ayuda de Microsoft",
     "Buscar de nuevo",
+    "Botón Guía",
     "Terminar la transmisión",
+    "La transmisión se terminó en la consola",
     "Otro dispositivo tomó la transmisión",
+    "La console se apagó",
     "%s recibió la solicitud, pero su juego remoto no se inició. Reiníciala: mantén pulsado el botón de encendido de la consola 10 segundos, enciéndela de nuevo y vuelve a intentarlo.",
+    "Panel táctil: desliza ↓ para el menú, ↑ para el botón Guía",
     "FSR + limpieza",
     "IA + limpieza",
     "Auto (%s)",
@@ -653,6 +687,7 @@ constexpr Column kFrench = {
     "Vous êtes dans la file d'attente. Attente estimée : %s",
     "Connexion...",
     "Démarrage du streaming...",
+    "Pavé tactile : ↓ ce menu · ↑ bouton Guide",
     "Streaming terminé",
     "Un problème est survenu",
     "Connecté en tant que %s",
@@ -690,6 +725,7 @@ constexpr Column kFrench = {
     "Disponibles à l'achat",
     "ACHETER",
     "Achetez ce jeu pour y jouer dans le cloud",
+    "Achetez-le sur site du service ou dans l'app do serviço ; il apparaîtra ensuite dans Mes jeux.",
     "Scannez pour ouvrir la page du magasin",
     "Rechercher dans %s",
     "GRATUIT",
@@ -745,6 +781,7 @@ constexpr Column kFrench = {
     "Mise à l'échelle",
     "IA (Anime4K)",
     "Gratuit",
+    "Obtenez-le une fois, gratuitement, sur site du service ou dans l'app do serviço (scannez le code avec votre téléphone), puis appuyez sur Jouer.",
     "Scannez pour l'obtenir gratuitement",
     "%s n'est pas encore sur votre compte. Il est gratuit : scannez le code sur sa page, choisissez Obtenir, puis réessayez (cela peut prendre une minute).",
     "Votre compte ne peut pas jouer à %s : il n'est pas dans votre abonnement ou n'a pas été acheté.",
@@ -753,14 +790,22 @@ constexpr Column kFrench = {
     "En veille",
     "Éteinte",
     "Recherche de vos consoles...",
+    "Aucune console trouvée pour l'instant",
+    "Jouez sur votre propre console d'ici : son écran, ses jeux et ses applications.",
+    "Réveil de votre console...",
     "%s n'a pas répondu. Vérifiez que les fonctionnalités à distance sont activées et le mode Veille choisi, ou allumez-la, puis réessayez.",
+    "Sur votre console, connectez-vous avec ce même compte Microsoft.",
     "Paramètres > Appareils et connexions > Fonctionnalités à distance : activez-les.",
     "Paramètres > Général > Options d'alimentation : choisissez Veille, pour qu'elle se réveille seule.",
     "Scannez pour l'aide de Microsoft",
     "Rechercher à nouveau",
+    "Bouton Guide",
     "Arrêter la diffusion",
+    "La diffusion a été arrêtée sur la consola",
     "Un autre appareil a repris la diffusion",
+    "La console a été éteinte",
     "%s a reçu la demande, mais son jeu à distance n'a pas démarré. Redémarrez-la : maintenez le bouton d'alimentation de la console 10 secondes, rallumez-la, puis réessayez.",
+    "Pavé tactile : glissez ↓ pour le menu, ↑ pour le bouton Guide",
     "FSR + nettoyage",
     "IA + nettoyage",
     "Auto (%s)",
@@ -853,6 +898,7 @@ constexpr Column kGerman = {
     "Du bist in der Warteschlange. Geschätzte Wartezeit: %s",
     "Verbindung wird hergestellt...",
     "Streaming wird gestartet...",
+    "Touchpad: ↓ dieses Menü · ↑ Guide-Taste",
     "Streaming beendet",
     "Etwas ist schiefgelaufen",
     "Angemeldet als %s",
@@ -890,6 +936,7 @@ constexpr Column kGerman = {
     "Zum Kaufen verfügbar",
     "KAUFEN",
     "Kaufe dieses Spiel, um es in der Cloud zu spielen",
+    "Kaufe es auf der Dienst-Website oder in der Dienst-App; danach erscheint es unter Meine Spiele.",
     "Scannen, um die Store-Seite zu öffnen",
     "Suchen in %s",
     "KOSTENLOS",
@@ -945,6 +992,7 @@ constexpr Column kGerman = {
     "Hochskalierung",
     "KI (Anime4K)",
     "Free-to-play",
+    "Einmal kostenlos auf der Dienst-Website oder in der Dienst-App holen (Code mit dem Handy scannen), dann Spielen drücken.",
     "Scannen, um es kostenlos zu holen",
     "%s ist noch nicht in deinem Konto. Es ist kostenlos: Code auf seiner Seite scannen, Abrufen wählen und erneut versuchen (kann eine Minute dauern).",
     "Dein Konto kann %s nicht spielen: nicht in deinem Abo oder nicht gekauft.",
@@ -953,14 +1001,22 @@ constexpr Column kGerman = {
     "Im Standby",
     "Aus",
     "Deine Konsolen werden gesucht...",
+    "Noch keine Konsole gefunden",
+    "Spiele hier auf deiner eigenen Konsole: ihr Bildschirm, ihre Spiele und Apps.",
+    "Deine Konsole wird geweckt...",
     "%s hat nicht geantwortet. Prüfe, ob die Remotefunktionen aktiv sind und der Energiemodus Ruhezustand ist, oder schalte sie ein und versuche es erneut.",
+    "Melde dich auf deiner Konsole mit genau diesem Microsoft-Konto an.",
     "Einstellungen > Geräte & Verbindungen > Remotefunktionen: Remotefunktionen aktivieren.",
     "Einstellungen > Allgemein > Energieoptionen: Ruhezustand wählen, damit sie von selbst aufwacht.",
     "Scannen für die Hilfe von Microsoft",
     "Erneut suchen",
+    "Guide-Taste",
     "Streaming beenden",
+    "Das Streaming wurde auf der Konsole beendet",
     "Ein anderes Gerät hat das Streaming übernommen",
+    "Die console wurde ausgeschaltet",
     "%s hat die Anfrage erhalten, aber Remote Play ist nicht gestartet. Starte sie neu: Halte die Ein/Aus-Taste der Konsole 10 Sekunden gedrückt, schalte sie wieder ein und versuche es erneut.",
+    "Touchpad: ↓ wischen für das Menü, ↑ für die Guide-Taste",
     "FSR + Bereinigung",
     "KI + Bereinigung",
     "Auto (%s)",
@@ -1053,6 +1109,7 @@ constexpr Column kItalian = {
     "Sei in coda. Attesa stimata: %s",
     "Connessione...",
     "Avvio dello streaming...",
+    "Touchpad: ↓ questo menu · ↑ pulsante Guida",
     "Streaming terminato",
     "Si è verificato un problema",
     "Accesso effettuato come %s",
@@ -1090,6 +1147,7 @@ constexpr Column kItalian = {
     "Disponibili per l'acquisto",
     "ACQUISTA",
     "Acquista questo gioco per giocarci nel cloud",
+    "Acquistalo su sito del servizio o nell'app do serviço; poi apparirà in I miei giochi.",
     "Scansiona per aprire la pagina dello store",
     "Cerca in %s",
     "GRATIS",
@@ -1145,6 +1203,7 @@ constexpr Column kItalian = {
     "Upscaling",
     "IA (Anime4K)",
     "Free to play",
+    "Ottienilo una volta, gratis, su sito del servizio o nell'app do serviço (scansiona il codice con il telefono), poi premi Gioca.",
     "Scansiona per ottenerlo gratis",
     "%s non è ancora nel tuo account. È gratis: scansiona il codice nella sua pagina, scegli Ottieni e riprova (può volerci un minuto).",
     "Il tuo account non può giocare a %s: non è nel tuo abbonamento o non è stato acquistato.",
@@ -1153,14 +1212,22 @@ constexpr Column kItalian = {
     "In standby",
     "Spenta",
     "Ricerca delle tue console...",
+    "Nessuna console trovata per ora",
+    "Gioca sulla tua console da qui: il suo schermo, i giochi e le app.",
+    "Accensione della tua console...",
     "%s non ha risposto. Controlla che le Funzionalità remote siano attive e la modalità sia Sospensione, oppure accendila, e riprova.",
+    "Sulla tua console, accedi con questo stesso account Microsoft.",
     "Impostazioni > Dispositivi e connessioni > Funzionalità remote: attiva le funzionalità remote.",
     "Impostazioni > Generale > Opzioni di alimentazione: scegli Sospensione, così si accende da sola.",
     "Scansiona per l'aiuto di Microsoft",
     "Cerca di nuovo",
+    "Pulsante Guida",
     "Termina lo streaming",
+    "Lo streaming è stato terminato sulla consola",
     "Un altro dispositivo ha preso lo streaming",
+    "La console è stata spenta",
     "%s ha ricevuto la richiesta, ma il gioco remoto non è partito. Riavviala: tieni premuto il pulsante di accensione della console per 10 secondi, riaccendila e riprova.",
+    "Touchpad: scorri ↓ per il menu, ↑ per il pulsante Guida",
     "FSR + pulizia",
     "IA + pulizia",
     "Auto (%s)",

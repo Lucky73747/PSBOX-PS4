@@ -27,6 +27,8 @@ bool readXbl(const net::Response& r, XblToken& out, std::string& err, const char
             int64_t x = (*j)["XErr"].asInt();
             err += " XErr " + std::to_string(x);
             // Well-known XSTS errors worth telling the user about.
+            if (x == 2148916233) err += " (this Microsoft account has no gaming profile yet)";
+            if (x == 2148916235) err += " (The gaming service is not available in this account's country)";
             if (x == 2148916238) err += " (child account: needs to be added to a family by an adult)";
         }
         return false;
@@ -52,6 +54,7 @@ bool xblUserToken(const std::string& msaAccessToken, const std::string& rpsPrefi
     body.set("TokenType", "JWT");
     body.set("Properties", props);
     return readXbl(postJson("https://user.auth.xboxlive.com/user/authenticate", body), out, err,
+                   "Gaming account authentication");
 }
 
 bool xstsToken(const XblToken& userToken, const std::string& relyingParty, XblToken& out,

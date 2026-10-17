@@ -80,6 +80,7 @@ NetworkStatus initializeNetworkAndCheckInternet() {
     if (g_httpContext < 0) { fail(status, "sceHttpInit", g_httpContext); return status; }
 
     const int32_t requestTemplate = sceHttpCreateTemplate(
+        g_httpContext, "PSBOX", ORBIS_HTTP_VERSION_1_1, 1);
     if (requestTemplate < 0) { fail(status, "sceHttpCreateTemplate", requestTemplate); return status; }
 
     rc = sceHttpSetResolveTimeOut(requestTemplate, kNetworkTimeoutUs);

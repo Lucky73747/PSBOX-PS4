@@ -588,6 +588,7 @@ PresentationHeartbeat presentationHeartbeat() {
 
     const char* instanceExtensions[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME};
     VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    appInfo.pApplicationName = "PSBOX";
     appInfo.applicationVersion = VK_MAKE_API_VERSION(0, 0, 1, 0);
     appInfo.pEngineName = "xcloud-ps4-bootstrap";
     appInfo.engineVersion = VK_MAKE_API_VERSION(0, 0, 1, 0);
@@ -773,6 +774,7 @@ PresentationHeartbeat presentationHeartbeat() {
     bool gpuVideoHasFrame = false;
     uint32_t lastVideoWidth = 0, lastVideoHeight = 0;
     VideoColorInfo activeVideoColor{};
+    logLine("setup complete; presenting PSBOX sign-in screen");
 
     using Clock = std::chrono::steady_clock;
     uint32_t targetFps = 60;

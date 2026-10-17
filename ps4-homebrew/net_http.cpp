@@ -144,6 +144,7 @@ static Response performAttempt(const Request& request, bool background) {
     }
 
     const int32_t templ = sceHttpCreateTemplate(
+        context, "PSBOX", ORBIS_HTTP_VERSION_1_1, 1);
     if (templ < 0) {
         response.error = httpError("sceHttpCreateTemplate", templ);
         return response;

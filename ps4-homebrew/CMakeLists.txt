@@ -177,6 +177,7 @@ if(COMMAND ps4_create_pkg)
   endforeach()
   ps4_create_pkg(xcloud_homebrew
     TITLE_ID XCHM00001
+    TITLE "PSBOX"
     CONTENT_LABEL PSBOXPS4
     ICON "${CMAKE_CURRENT_LIST_DIR}/../assets/ps4/icon0.png"
     EXTRA_FILES

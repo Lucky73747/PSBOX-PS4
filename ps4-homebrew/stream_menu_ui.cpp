@@ -305,6 +305,7 @@ void controls(Panel& p) {
     y=p.row("Abrir menu",-1); padButton(p.p,PadButton::Options,321,y+15);
     y=p.row("Trocar painel",-1);
     padButton(p.p,PadButton::L1,280,y+15);padButton(p.p,PadButton::R1,323,y+15);
+    y=p.row("Guide",-1);padButton(p.p,PadButton::Touchpad,313,y+13);
     y=p.row("Sair do jogo",-1);
     padButton(p.p,PadButton::Options,279,y+15);
     p.p.line(313,y+26,313,y+34,kMuted,1.5f);p.p.line(309,y+30,317,y+30,kMuted,1.5f);

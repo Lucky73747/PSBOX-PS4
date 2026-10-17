@@ -35,6 +35,7 @@ struct StreamStatsUiConfig {
 };
 
 struct StreamStatsUiData {
+    std::string title = "PSBOX";
     std::string resolution = "720p";
     uint32_t fps = 0, dropPerSecond = 0;
     int rttMs = -1;

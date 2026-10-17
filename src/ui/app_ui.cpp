@@ -322,6 +322,7 @@ void AppUi::setOwned(std::vector<GameTile> owned, std::vector<GameTile> purchasa
 void AppUi::setCloudLibrary(std::vector<GameTile> titles) {
     std::lock_guard<std::mutex> lock(mutex_);
     GameRow row;
+    row.title = "PSBOX";
     row.tiles = titles;
     row.gamePassBadges = false;
     allRows_ = {std::move(row)};
@@ -1145,6 +1146,8 @@ bool AppUi::accentColor(Color& out) {
         auto img = images_.get(t->tileUrl, kCard, kCard);  // the card's own, already loaded
         if (!img) return false;
         Color c;
+        // No dominant artwork colour: use the PSBOX accent.
+        if (!dominantColor(*img, c)) c = rgba(168, 196, 207);
         it = accents_.emplace(t->tileUrl, c).first;
     }
     out = it->second;
@@ -1430,6 +1433,7 @@ void AppUi::handleHome(const NavInput& in, UiEvent& ev) {
                 const ConsoleTile& con = consoles_[static_cast<size_t>(consoleFocus_)];
                 ev.action = Action::Play;
                 ev.game.titleId = con.serverId;
+                ev.game.name = con.name.empty() ? "Console" : con.name;
                 ev.game.homeConsole = true;
             }
             break;
@@ -1575,6 +1579,7 @@ std::vector<std::string> AppUi::poolGenres() const {
 std::vector<std::string> AppUi::filterOptions(Filter f) const {
     // Caller holds mutex_. The first choice is always "all".
     switch (f) {
+    case Filter::Console: return {tr(Str::FilterAllConsoles), "SERIES X|S", "ONE", "360"};
     case Filter::Mode:
         return {tr(Str::ModeAll), tr(Str::ModeSingle), tr(Str::ModeOnlineMulti), tr(Str::ModeOnlineCoop), tr(Str::ModeLocal)};
     case Filter::Genre: {
@@ -1585,6 +1590,7 @@ std::vector<std::string> AppUi::filterOptions(Filter f) const {
     case Filter::Publisher:
         return {
             tr(Str::PublisherAll),
+            "Microsoft Studios / Bethesda",
             "Electronic Arts",
             "Ubisoft",
             "Square Enix",
@@ -2315,6 +2321,8 @@ Rect drawQr(Canvas& c, const std::string& url, int right, int top, int target) {
 }
 
 const char* platformLabel(const std::string& code) {
+    if (code == "360") return "360";
+    if (code == "ONE") return "ONE";
     if (code == "XS") return "SERIES X|S";
     return nullptr;
 }
@@ -2748,8 +2756,14 @@ void AppUi::drawConsoles(Canvas& c, uint64_t nowMs) {
         bool on = con.power == "On";
         c.fillCircle(static_cast<float>(box.x + (tower ? box.w / 2 : 24)), static_cast<float>(box.y + (tower ? 22 : box.h / 2)),
                      tower ? 16.0f : 9.0f, on ? kGreen : rgba(90, 90, 90));
+        std::string name = con.name.empty() ? "Console" : con.name;
         auto lines = fonts_.semibold.wrap(name, 30, kCardW - 48, 1);
         if (!lines.empty()) fonts_.semibold.draw(c, lines[0], x + 24, kTop + 236, 30, kWhite);
+        std::string model = con.type == "XboxSeriesX"   ? "Series X"
+                            : con.type == "XboxSeriesS" ? "Series S"
+                            : con.type == "XboxOneX"    ? "One X"
+                            : con.type == "XboxOneS"    ? "One S"
+                            : con.type == "XboxOne"     ? "One"
                                                         : con.type;
         fonts_.regular.draw(c, model, x + 24, kTop + 284, 24, kGray);
         const char* state = on ? tr(Str::ConsoleOn)

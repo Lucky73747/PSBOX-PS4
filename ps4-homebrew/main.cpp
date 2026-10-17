@@ -1670,6 +1670,7 @@ void* sessionWorker(void* opaque) {
                     if (touchpad && !previousTouchpad) {
                         xboxGuideUntil = now + 250;
                         guidePulseUntil.store(xboxGuideUntil, std::memory_order_release);
+                        logLine("Guide pulse requested by touchpad rising edge duration_ms=250");
                     }
                     previousTouchpad = touchpad;
                     previousCircle = circle;
@@ -2166,6 +2167,7 @@ void loadPs5LibraryUi(xc::ui::AppUi& appUi, const LoginSnapshot& state) {
     appUi.setCloudLibrary(makeGameTiles(state));
     appUi.setLoading(state.libraryLoading, state.libraryLoaded, 0);
     appUi.setProfile(state.gamertag, {});
+    appUi.showHome("PSBOX");
     appUi.showTab(xc::ui::Tab::Library);
 }
 
@@ -2197,6 +2199,7 @@ size_t jumpToAdjacentInitial(const std::vector<xc::xcloud::Title>& titles, size_
     using namespace xc::ui;
     static const std::vector<xc::xcloud::Title> kNoTitles;
     const auto& titles = s.visibleTitles ? *s.visibleTitles : kNoTitles;
+    fonts.bold.draw(canvas, "PSBOX", 150, 235, 68, rgba(255, 255, 255));
     const bool inLibrary = s.stage == LoginStage::Library || s.stage == LoginStage::SessionStarting ||
                            s.stage == LoginStage::SessionProvisioning || s.stage == LoginStage::SessionReady;
     fonts.semibold.draw(canvas, inLibrary ? "Choose a cloud game" : "Sign in with your Microsoft account",
@@ -2256,9 +2259,12 @@ size_t jumpToAdjacentInitial(const std::vector<xc::xcloud::Title>& titles, size_
             }
             break;
         case LoginStage::XboxLive:
+            fonts.semibold.draw(canvas, "Connecting to your gaming account...", 150, 535, 34, rgba(140, 235, 145));
+            fonts.regular.draw(canvas, "Authorizing your gaming profile.", 150, 590, 25,
                                rgba(205, 215, 205));
             break;
         case LoginStage::Xcloud:
+            fonts.semibold.draw(canvas, "Connecting to the streaming service...", 150, 535, 34,
                                 rgba(140, 235, 145));
             fonts.regular.draw(canvas, "Checking xCloud access and available region.", 150, 590, 25,
                                rgba(205, 215, 205));
@@ -2319,6 +2325,7 @@ size_t jumpToAdjacentInitial(const std::vector<xc::xcloud::Title>& titles, size_
             break;
         }
         case LoginStage::Streaming:
+            fonts.semibold.draw(canvas, s.streamTransportLost ? "Stream paused; app remains open" : "Connecting to the video stream",
                                 150, 535, 34, s.streamTransportLost ? rgba(255, 205, 116) : rgba(140, 235, 145));
             fonts.regular.draw(canvas, s.sessionMessage.c_str(), 150, 590, 23, rgba(205, 215, 205));
             fonts.regular.draw(canvas, s.streamTransportLost
@@ -2343,6 +2350,7 @@ size_t jumpToAdjacentInitial(const std::vector<xc::xcloud::Title>& titles, size_
                          s.stage == LoginStage::Failed && !titles.empty() ? "Circle: return to library" :
                          s.stage == LoginStage::SessionProvisioning || s.stage == LoginStage::SessionStarting
                              ? "Keep the app open while the cloud session is prepared" :
+                               "PS4 network: Microsoft account + streaming HTTPS";
     fonts.regular.draw(canvas, footer, 180, 923, 21,
                        rgba(190, 205, 190));
 }
@@ -2644,6 +2652,7 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
                     state.streamSettingsOpen?state.streamDraftStatsUiConfig:state.streamStatsUiConfig);
             } else if (state.streamStatsMode == 2) {
                 xc::ps4::StreamStatsUiData stats;
+                stats.title="PSBOX";
                 if(state.streamWidth&&state.streamHeight){
                     char resolution[32];std::snprintf(resolution,sizeof(resolution),"%up",state.streamHeight);
                     stats.resolution=resolution;
@@ -2669,6 +2678,7 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
             legacy.disconnected=state.streamTransportLost;
             char title[128];
             std::snprintf(title, sizeof(title), "%s  |  requested %s  |  %s",
+                state.streamTransportLost ? "STREAM PAUSED" : (videoStalled ? "VIDEO STALLED" : "STREAM LIVE"),
                 tierLabel(state.streamTier),
                 performance.width ? "VIDEO ACTIVE" : "VIDEO STARTING");
             legacy.title=title;
