@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "created_utc": "2026-10-18T03:16:18.754275+00:00",
+  "created_utc": "2026-10-18T03:19:40.572871+00:00",
   "application": "PSBOX-PS4",
   "scope": "current selected source, including uncommitted changes",
   "history_included": false,
@@ -63,8 +63,8 @@
     },
     {
       "path": "README.md",
-      "size": 7450,
-      "sha256": "1f7ed53ddafc0dadccc42b5b4239c32ddd77c63548c4d659a7543ba526681b40"
+      "size": 21075,
+      "sha256": "1f5749e196bc2c6fdd6bdbd78b319a986dc39b9aa6e98ede828199718abedb9a"
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
