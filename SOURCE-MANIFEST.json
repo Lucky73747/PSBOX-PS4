@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "created_utc": "2026-10-18T03:07:36.958310+00:00",
+  "created_utc": "2026-10-18T03:11:11.578164+00:00",
   "application": "PSBOX-PS4",
   "scope": "current selected source, including uncommitted changes",
   "history_included": false,
@@ -10,6 +10,11 @@
       "path": ".github/workflows/build-ps4.yml",
       "size": 436,
       "sha256": "e8ce1b1343c36060fd36caba5cacda7f1be680e274d19a7154b17cb0578d50b0"
+    },
+    {
+      "path": ".github/workflows/compile-ps4.yml",
+      "size": 3013,
+      "sha256": "784ede0658ccbb23d1bc71b0b0af472d27a6a9bbd77f3f088aa2a66658bdf55c"
     },
     {
       "path": ".gitignore",
@@ -33,8 +38,8 @@
     },
     {
       "path": "BUILDING.md",
-      "size": 1322,
-      "sha256": "ed217597425662f62d1884044f66751fb0a3feb9bd90bd23a46788f53a5e1885"
+      "size": 2185,
+      "sha256": "f98e0ba4a098571b416906f5b4d5e7f54e85314efdda114cdce1736ba25da20b"
     },
     {
       "path": "BUILD_NUMBER",
@@ -58,8 +63,8 @@
     },
     {
       "path": "README.md",
-      "size": 7135,
-      "sha256": "86bef0d4b3f57a745fbfb72690a8bcf3634de05b7b562897b588ab96ec812463"
+      "size": 7234,
+      "sha256": "af1d2124c60e42a54349bce45231bd26997bb0aff39c79592dc502c3d5dae1b7"
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
@@ -40863,8 +40868,8 @@
     },
     {
       "path": "docs/PUBLICATION.md",
-      "size": 1096,
-      "sha256": "1e3785277a4c6b3e01065a6a3382e68adaf03181bf1b50a513d039760a934ead"
+      "size": 1265,
+      "sha256": "340d99379726a0b38124308b15e42da6232d48b2d47c40e773fd55cdb7e78231"
     },
     {
       "path": "docs/SOURCE-PROVENANCE.md",

@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Compile PS4 beta
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compile-ps4-beta
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check public source
+        run: python3 tools/release/check-public-tree.py
+      - name: Install host toolchain
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor | sudo tee /usr/share/keyrings/llvm.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' | sudo tee /etc/apt/sources.list.d/llvm21.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-21 lld-21 llvm-21 cmake ninja-build zstd libicu74
+      - name: Restore private build inputs
+        env:
+          INPUTS_URL: ${{ secrets.PSBOX_BUILD_INPUTS_URL }}
+          INPUTS_SHA256: ${{ vars.PSBOX_BUILD_INPUTS_SHA256 }}
+        run: |
+          set -euo pipefail
+          test -n "$INPUTS_URL" && test -n "$INPUTS_SHA256"
+          # Python avoids putting a signed URL in process arguments or curl errors.
+          python3 - <<'PYTHON'
+          import os, urllib.request
+          from pathlib import Path
+          try:
+              with urllib.request.urlopen(os.environ['INPUTS_URL'], timeout=120) as source, Path('inputs.tar.zst').open('wb') as dest:
+                  while chunk := source.read(1024 * 1024):
+                      dest.write(chunk)
+          except Exception:
+              raise SystemExit('Private input download failed; renew the temporary download secret.')
+          PYTHON
+          printf '%s  inputs.tar.zst\n' "$INPUTS_SHA256" | sha256sum -c -
+          tar --zstd -xf inputs.tar.zst
+          rm inputs.tar.zst
+      - name: Compile and package
+        env:
+          PSBOX_BUILD_JOBS: '4'
+        run: |
+          set -euo pipefail
+          tools/ps4/build.sh --check-inputs
+          tools/ps4/build.sh
+          version=$(tr -d '\r\n' < VERSION)
+          build=$(tr -d '\r\n' < BUILD_NUMBER)
+          package="PSBOX-${version}-beta-b${build}.pkg"
+          test -s "build-ps4-homebrew/$package"
+          mkdir release-output
+          cp "build-ps4-homebrew/$package" release-output/
+          (cd release-output && sha256sum "$package" > SHA256SUMS)
+          printf 'App: %s\nBuild: %s\nCommit: %s\nTitle ID: PSBX00001\nInstaller: 00.01\nRuntime validation: pending\n' "$version" "$build" "$GITHUB_SHA" > release-output/BUILD.txt
+      - name: Save package only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: PSBOX-PS4-beta
+          path: release-output/
+          if-no-files-found: error
+          retention-days: 14

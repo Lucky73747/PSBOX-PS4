@@ -30,7 +30,7 @@ tools/ps4/build.sh --check-inputs
 tools/ps4/build.sh
 ```
 
-The first command checks for required inputs; the second builds the app and package. A successful build confirms compilation and packaging only, not runtime behavior. The public source workflow checks the selected source tree and does not build or publish a PKG.
+The first command checks for required inputs; the second builds the app and package. A successful build confirms compilation and packaging only, not runtime behavior. The source-check workflow validates the selected tree. A separate manual GitHub-hosted compilation workflow produces a PKG artifact using private external inputs; see [BUILDING.md](BUILDING.md).
 
 ## Source checks
 

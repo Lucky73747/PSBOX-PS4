@@ -11,4 +11,4 @@ The export contains the selected application sources, dependency notices and a m
 
 Before changing repository visibility, review the exact export, all branches and tags, commit history, releases, Actions artifacts and license obligations. The export checks file selection, documentation links, notices, symlinks and common credential patterns. It cannot identify every secret, verify runtime behavior, clear third-party licensing, or make other repository refs safe to publish.
 
-The public `build-ps4.yml` workflow runs source checks by manual dispatch only. It does not compile or publish a PKG. Complete [LICENSE-STATUS.md](LICENSE-STATUS.md) before distributing a binary.
+The `build-ps4.yml` workflow runs source checks by manual dispatch only. The separate `compile-ps4.yml` workflow compiles on GitHub-hosted Ubuntu with private inputs supplied by a temporary secret URL; it uploads a package artifact, not a release. Neither workflow deploys to a console. Complete [LICENSE-STATUS.md](LICENSE-STATUS.md) before distributing a binary.
