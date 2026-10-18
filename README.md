@@ -44,27 +44,21 @@ Obtain packages only from sources you trust. Consider the risks of using experim
 
 At a high level, PSBOX authenticates with the user's account, negotiates a streaming session, receives audio and video, and presents the decoded video on the PS4. The diagram shows the main data paths; implementation details and fallback paths can change as development continues.
 
-```mermaid
-flowchart TB
-    Player["Player: sign in and choose a game"] --> App["PSBOX"]
-    App <-->|"Authentication and session setup"| Cloud["Streaming service"]
+```text
+Streaming service
+  |
+  +-- Video --> H.264 receiver --> PS4 hardware decoder
+  |                                      |
+  |                                      v
+  |                            Vulkan: color + scaling + UI
+  |                                      |
+  |                                      v
+  |                                  PS4 display
+  |
+  +-- Audio --> Opus decoder --> PS4 audio output
 
-    subgraph PS4["PlayStation 4 — PSBOX client"]
-        direction TB
-        Transport["WebRTC transport"]
-        Transport -->|"H.264 video"| Receive["Packet reordering and frame assembly"]
-        Receive --> Decode["Videodec2 hardware decoder"]
-        Decode -->|"NV12 frames"| GPU["Vulkan: color conversion and scaling"]
-        UI["Menus and statistics"] --> GPU
-        GPU -->|"Composited frames"| Display["VideoOut → display"]
-        Transport -->|"Opus audio"| Audio["Opus decoder → PCM → PS4 audio output"]
-        Pad["Controller and supported text input"] -->|"Data channel"| Transport
-        Receive -.->|"Loss and keyframe feedback"| Transport
-    end
-
-    Cloud -->|"SRTP: audio and video"| Transport
-    Transport -->|"RTCP: NACK / PLI / REMB"| Cloud
-    Transport -->|"Input over SCTP data channel"| Cloud
+PS4 controller --> PSBOX --> Streaming service
+PSBOX --> Network feedback --> Streaming service
 ```
 
 REMB communicates a requested receive bitrate; it does not force the service to deliver that bitrate. The diagram summarizes the normal PS4 path; fallback paths and recovery are omitted for clarity. Text delivery still needs validation for each game.
@@ -192,27 +186,21 @@ Baixe pacotes somente de fontes confiáveis. Considere os riscos de usar softwar
 
 Em linhas gerais, o PSBOX autentica a conta do usuário, negocia uma sessão de streaming, recebe áudio e vídeo e apresenta no PS4 o vídeo decodificado. O diagrama mostra os principais caminhos de dados; detalhes da implementação e caminhos alternativos podem mudar durante o desenvolvimento.
 
-```mermaid
-flowchart TB
-    Player["Jogador: login e seleção do jogo"] --> App["PSBOX"]
-    App <-->|"Autenticação e preparação da sessão"| Cloud["Serviço de streaming"]
+```text
+Serviço de streaming
+  |
+  +-- Vídeo --> Receptor H.264 --> Decoder de hardware do PS4
+  |                                      |
+  |                                      v
+  |                            Vulkan: cor + escala + UI
+  |                                      |
+  |                                      v
+  |                                  Tela do PS4
+  |
+  +-- Áudio --> Decoder Opus --> Saída de áudio do PS4
 
-    subgraph PS4["PlayStation 4 — cliente PSBOX"]
-        direction TB
-        Transport["Transporte WebRTC"]
-        Transport -->|"Vídeo H.264"| Receive["Reordenação de pacotes e montagem de quadros"]
-        Receive --> Decode["Decodificador de hardware Videodec2"]
-        Decode -->|"Quadros NV12"| GPU["Vulkan: conversão de cor e escala"]
-        UI["Menus e estatísticas"] --> GPU
-        GPU -->|"Quadros compostos"| Display["VideoOut → tela"]
-        Transport -->|"Áudio Opus"| Audio["Decodificador Opus → PCM → saída de áudio PS4"]
-        Pad["Controle e entrada de texto compatível"] -->|"Canal de dados"| Transport
-        Receive -.->|"Feedback de perdas e quadros-chave"| Transport
-    end
-
-    Cloud -->|"SRTP: áudio e vídeo"| Transport
-    Transport -->|"RTCP: NACK / PLI / REMB"| Cloud
-    Transport -->|"Inputs pelo canal SCTP"| Cloud
+Controle PS4 --> PSBOX --> Serviço de streaming
+PSBOX --> Feedback de rede --> Serviço de streaming
 ```
 
 O REMB comunica um bitrate solicitado; não obriga o serviço a entregar essa taxa. O diagrama resume o caminho normal do PS4, sem detalhar os caminhos alternativos e a recuperação. A entrega de texto ainda precisa ser validada em cada jogo.
