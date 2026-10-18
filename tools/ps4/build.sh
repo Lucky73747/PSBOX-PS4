@@ -6,6 +6,7 @@ BUILD_DIR="${PSBOX_BUILD_DIR:-$ROOT/build-ps4-homebrew}"
 BUILD_JOBS="${PSBOX_BUILD_JOBS:-2}"
 DEFAULT_BUILD_NUMBER="$(tr -d '\r\n' < "$ROOT/BUILD_NUMBER")"
 PSBOX_BUILD_NUMBER="${PSBOX_BUILD_NUMBER:-$DEFAULT_BUILD_NUMBER}"
+PSBOX_VERSION="$(tr -d '\r\n' < "$ROOT/VERSION")"
 SDK_BUNDLE="${PS4_ORBIS_SDK_BUNDLE:-$ROOT/dependencies/orbis-sdk-v1/orbis-sdk-v1}"
 OO_TOOLCHAIN="${OO_PS4_TOOLCHAIN:-$ROOT/dependencies/OpenOrbis-PS4-Toolchain}"
 ORBIS_KIT="${ORBIS_KIT_DIR:-$ROOT/dependencies/orbis-porting-kit}"
@@ -82,9 +83,10 @@ cmake -S "$ROOT/ps4-homebrew" -B "$BUILD_DIR" -G Ninja \
   -DPSBOX_BUILD_NUMBER="$PSBOX_BUILD_NUMBER"
 
 ninja -C "$BUILD_DIR" -j"$BUILD_JOBS" xcloud_homebrew
-PKG_PATH="$BUILD_DIR/XCHM00001.pkg"
+PKG_PATH="$BUILD_DIR/PSBX00001.pkg"
+RELEASE_PKG="$BUILD_DIR/PSBOX-${PSBOX_VERSION}-beta-b${PSBOX_BUILD_NUMBER}.pkg"
 if [[ -e "$PKG_PATH" ]]; then
-  ln -sfn "$(basename "$(readlink -f "$PKG_PATH")")" "$BUILD_DIR/PSBOX-PS4.pkg"
+  cp -f "$PKG_PATH" "$RELEASE_PKG"
 fi
 printf '\nBuilt: %s/xcloud_homebrew\n' "$BUILD_DIR"
-printf 'PKG:   %s/PSBOX-PS4.pkg\n' "$BUILD_DIR"
+printf 'PKG:   %s\n' "$RELEASE_PKG"

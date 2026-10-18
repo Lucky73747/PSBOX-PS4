@@ -29,7 +29,7 @@ KLOG_CENTER = ROOT / "klog-center.py"
 DEFAULT_HOST = ""
 DEFAULT_KLOG_PORT = 3232
 DEFAULT_FTP_PORT = 2121
-DEFAULT_TITLE_ID = "XCHM00001"
+DEFAULT_TITLE_ID = "PSBX00001"
 FTP_LOG_DIRS = (
     "/data/PSBOX",
 )
@@ -309,7 +309,7 @@ class FtpLogCollector:
                 ftp = self._connect("/data/sce_coredumps")
                 candidates = [PurePosixPath(x.rstrip("/")).name for x in ftp.nlst()]
                 for dirname in candidates[-20:]:
-                    if not dirname.startswith("XCHM00001_"):
+                    if not dirname.startswith(("PSBX00001_", "XCHM00001_")):
                         continue
                     try:
                         dump_epoch = int(dirname.rsplit("_", 1)[-1])

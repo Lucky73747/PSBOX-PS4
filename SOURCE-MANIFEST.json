@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "created_utc": "2026-10-18T02:37:51.719063+00:00",
+  "created_utc": "2026-10-18T03:07:36.958310+00:00",
   "application": "PSBOX-PS4",
   "scope": "current selected source, including uncommitted changes",
   "history_included": false,
@@ -18,8 +18,8 @@
     },
     {
       "path": "AGENTS.md",
-      "size": 1650,
-      "sha256": "5fdfde13e6ea2a711c2b752f4c5de9a60c38e0d5d671477804ae3f7d85838f4b"
+      "size": 1712,
+      "sha256": "446037e3d4105ef474bd7a2b69913970ebc1590c1cb15ca9d05886d2d45db5be"
     },
     {
       "path": "BETA_TESTING.md",
@@ -38,8 +38,8 @@
     },
     {
       "path": "BUILD_NUMBER",
-      "size": 4,
-      "sha256": "bcea5d7d8b256f1bda5f90a3ede41899e94b89fccb4e4d2786073b5bfaa0002a"
+      "size": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
     },
     {
       "path": "DEPENDENCIES-RECOVERY.md",
@@ -58,8 +58,8 @@
     },
     {
       "path": "README.md",
-      "size": 6600,
-      "sha256": "b6f111dd28abc6be70356c63d62b43ddbe84d00708964af3519f55d776f83375"
+      "size": 7135,
+      "sha256": "86bef0d4b3f57a745fbfb72690a8bcf3634de05b7b562897b588ab96ec812463"
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
@@ -40847,6 +40847,11 @@
       "sha256": "6cda5aa913410301198d91ce3da86f4a943e8800f8d8aa70a6046545e939361c"
     },
     {
+      "path": "docs/CHANGELOG.md",
+      "size": 2793,
+      "sha256": "1158d35b9fe63c545a2cb0566a2765057eca766bebfdd3ae79137f1050835d42"
+    },
+    {
       "path": "docs/LICENSE-STATUS.md",
       "size": 2089,
       "sha256": "47f07548c3014acb1f6a96bae21a57515796f91fab178c098881541d8cba9264"
@@ -41129,7 +41134,7 @@
     {
       "path": "ps4-homebrew/CMakeLists.txt",
       "size": 9896,
-      "sha256": "8ce43f0528e6e753c95481c9c1027a82870c71912585a0761bf4439e3ad6e94c"
+      "sha256": "76a3fe2979e42fce3fd10bfb81e581c41ae86eebe7834735c3906d71c7ac1e87"
     },
     {
       "path": "ps4-homebrew/audio_player.cpp",
@@ -41908,8 +41913,8 @@
     },
     {
       "path": "tools/ps4/build.sh",
-      "size": 3655,
-      "sha256": "919e36ff0927b1b459e5e3f62c690dbf1729704953d651469a65250b6b665cf1"
+      "size": 3728,
+      "sha256": "3044e99f7d242068deb6857dd36aed7c08d65b41c44d56ca85fe1fc8c3aa75ea"
     },
     {
       "path": "tools/ps4/ps4-pc-manager/agent_cli.py",
@@ -41938,8 +41943,8 @@
     },
     {
       "path": "tools/ps4/ps4-pc-manager/psbox-run-capture.py",
-      "size": 31878,
-      "sha256": "292df4a6c2177b539c475d02f4f0fd9ef382854a411efecd34ca60bfea27bec1"
+      "size": 31894,
+      "sha256": "841cc7d33fb7d6f0a76e1766610b46584e5cb385e1fdb3a211280f3a2222ad90"
     },
     {
       "path": "tools/ps4/ps4-pc-manager/requirements.txt",
