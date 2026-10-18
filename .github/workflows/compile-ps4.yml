@@ -28,6 +28,10 @@ jobs:
           echo 'deb [signed-by=/usr/share/keyrings/llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' | sudo tee /etc/apt/sources.list.d/llvm21.list >/dev/null
           sudo apt-get update -qq
           sudo apt-get install -y clang-21 lld-21 llvm-21 cmake ninja-build zstd libicu74
+          curl --fail --silent --show-error https://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb -o "$RUNNER_TEMP/libssl1.1.deb"
+          echo "7cf39d70a639017d1dd7c8d36daa2258063608688e449fddf40ffdd46f992a78  $RUNNER_TEMP/libssl1.1.deb" | sha256sum -c -
+          dpkg-deb -x "$RUNNER_TEMP/libssl1.1.deb" "$RUNNER_TEMP/openssl11"
+          echo "PS4_PKGTOOL_OPENSSL_LIB=$RUNNER_TEMP/openssl11/usr/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
       - name: Restore private build inputs
         env:
           INPUTS_URL: ${{ secrets.PSBOX_BUILD_INPUTS_URL }}

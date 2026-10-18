@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "created_utc": "2026-10-18T03:11:11.578164+00:00",
+  "created_utc": "2026-10-18T03:12:25.539420+00:00",
   "application": "PSBOX-PS4",
   "scope": "current selected source, including uncommitted changes",
   "history_included": false,
@@ -13,8 +13,8 @@
     },
     {
       "path": ".github/workflows/compile-ps4.yml",
-      "size": 3013,
-      "sha256": "784ede0658ccbb23d1bc71b0b0af472d27a6a9bbd77f3f088aa2a66658bdf55c"
+      "size": 3492,
+      "sha256": "f4b9f2c14a29111118a447e0b8038b05aa13f72da047e8293090d1886d24f571"
     },
     {
       "path": ".gitignore",
