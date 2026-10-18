@@ -22,13 +22,20 @@ REQUIRED = ['ps4-homebrew/CMakeLists.txt', 'README.md', 'BUILDING.md', 'VERSION'
             'src/platform/ps4_build_info.h',
             'ps4-homebrew/stream_menu_ui.cpp', 'ps4-homebrew/stream_stats_ui.cpp']
 
-def check(root: Path) -> tuple[list[str], int]:
+def check(root: Path, verify_manifest: bool = True) -> tuple[list[str], int]:
     errors = []
     files = selected_files(root)
     chosen = {str(p) for p in files}
     for name in REQUIRED:
         if name not in chosen:
             errors.append(f'Missing selected source/notice: {name}')
+    # Audit every tracked path, not just a selected subset of a checkout.
+    if (root / '.git').exists():
+        import subprocess
+        tracked = subprocess.check_output(['git', '-C', str(root), 'ls-files', '-z'])
+        for name in tracked.split(b'\0'):
+            if name and not is_public_path(Path(name.decode())):
+                errors.append('Excluded tracked file: ' + name.decode())
     # An export/archive must contain ONLY approved files, not just select a subset.
     if not (root / '.git').exists():
         for p in root.rglob('*'):
@@ -85,7 +92,7 @@ def check(root: Path) -> tuple[list[str], int]:
             if marker in text:
                 errors.append(f'Public workflow contains private/binary action: {marker}')
     manifest = root / 'SOURCE-MANIFEST.json'
-    if manifest.exists():
+    if verify_manifest and manifest.exists():
         records = json.loads(manifest.read_text())['files']
         listed = {entry['path'] for entry in records}
         if listed != chosen - {'SOURCE-MANIFEST.json'}:

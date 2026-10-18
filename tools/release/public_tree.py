@@ -50,20 +50,12 @@ def is_public_path(path: Path) -> bool:
 
 def selected_files(root: Path) -> list[Path]:
     if (root / '.git').exists():
-        # Includes current untracked public modules, but never deleted files.
+        # Tracked files must remain audited even when an ignore rule matches them.
+        # Ignore rules apply only to untracked candidates; deleted files are omitted.
         raw = subprocess.check_output(['git', '-C', str(root), 'ls-files',
                                        '--cached', '--others', '--exclude-standard', '-z'])
         paths = [Path(x.decode('utf-8')) for x in raw.split(b'\0') if x]
         candidates = sorted({p for p in paths if is_public_path(p)}, key=str)
-        if candidates:
-            ignored = subprocess.run(['git', '-C', str(root), 'check-ignore',
-                                      '--no-index', '--stdin', '-z'],
-                                     input=b'\0'.join(str(p).encode() for p in candidates)+b'\0',
-                                     stdout=subprocess.PIPE, check=False)
-            if ignored.returncode not in (0, 1):
-                raise RuntimeError('Could not inspect ignored files')
-            excluded = set(ignored.stdout.split(b'\0'))
-            candidates = [p for p in candidates if str(p).encode() not in excluded]
         return [p for p in candidates if (root / p).is_file() or (root / p).is_symlink()]
     return sorted((p.relative_to(root) for p in root.rglob('*')
                    if (p.is_file() or p.is_symlink()) and is_public_path(p.relative_to(root))), key=str)

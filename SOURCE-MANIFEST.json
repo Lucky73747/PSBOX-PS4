@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "created_utc": "2026-10-18T00:46:55.340936+00:00",
+  "created_utc": "2026-10-18T02:37:51.719063+00:00",
   "application": "PSBOX-PS4",
   "scope": "current selected source, including uncommitted changes",
   "history_included": false,
@@ -8,8 +8,8 @@
   "files": [
     {
       "path": ".github/workflows/build-ps4.yml",
-      "size": 460,
-      "sha256": "8b9dc77738f9fbe0babebcf9dfbc489d31cd305facd5474464233e6f813eb171"
+      "size": 436,
+      "sha256": "e8ce1b1343c36060fd36caba5cacda7f1be680e274d19a7154b17cb0578d50b0"
     },
     {
       "path": ".gitignore",
@@ -48,8 +48,8 @@
     },
     {
       "path": "DEPENDENCIES.md",
-      "size": 2717,
-      "sha256": "572c374900934a2ebe5c95e5936beeccb4e2b7b9496a301735f7f43a801f083d"
+      "size": 3104,
+      "sha256": "24bd6e82f8d4d364bb0ff849b603dcbf1c6a7ab2e6eada220bb8d2dad42ef58b"
     },
     {
       "path": "LICENSE",
@@ -37278,8 +37278,8 @@
     },
     {
       "path": "deps/opus/.gitattributes",
-      "size": 186,
-      "sha256": "8849b586b02d3be0144ce83a5fdcb6fefb6825a85b1dbcb8b660acb8db5e6bd2"
+      "size": 174,
+      "sha256": "cc0d62a02eee907d37b92aec14b8fdf0fb69748ebcfcc42fed136409f3c2ccec"
     },
     {
       "path": "deps/opus/.github/workflows/autotools.yml",
@@ -40858,8 +40858,8 @@
     },
     {
       "path": "docs/PUBLICATION.md",
-      "size": 1081,
-      "sha256": "93f2b2e20dde5eb393e2271cc20228a1275628b6112cedfcf51c8e79f71fb6d4"
+      "size": 1096,
+      "sha256": "1e3785277a4c6b3e01065a6a3382e68adaf03181bf1b50a513d039760a934ead"
     },
     {
       "path": "docs/SOURCE-PROVENANCE.md",
@@ -42023,18 +42023,18 @@
     },
     {
       "path": "tools/release/check-public-tree.py",
-      "size": 6177,
-      "sha256": "f2dbd29ab62d1255d6352fea10afe97d2548469d39355212c3bb111b5c7829b9"
+      "size": 6626,
+      "sha256": "11e82d08d5b2a7c3998e0a37a7ee1f8d386163814d733a0ad8ee75f640eeebe4"
     },
     {
       "path": "tools/release/export-public-source.py",
-      "size": 3351,
-      "sha256": "2a57d05fcd11899d9b4e1d12c0f8debbbd57f05063ba98d1585fc06d3e3fc195"
+      "size": 5056,
+      "sha256": "605c0067312a8c49292ba6cae60d6d73c038bcfcc121102e791c973d428aae6f"
     },
     {
       "path": "tools/release/public_tree.py",
-      "size": 4353,
-      "sha256": "439058553b042778727d550d5d1dac6cec78633e915939a24ab5329e5a522488"
+      "size": 3842,
+      "sha256": "00edf3b3e767ef53250f8ea4d828d5942b15f61adb6ad616e4fbb86df80cac11"
     },
     {
       "path": "tools/release/record-external-inputs.py",

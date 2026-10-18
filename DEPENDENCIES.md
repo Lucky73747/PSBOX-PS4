@@ -32,3 +32,7 @@ These are base identities from the source inventory, not a claim that vendored t
 The external build inputs are not bundled here. See [BUILD-PREREQUISITES.md](BUILD-PREREQUISITES.md) for configurable paths, [docs/external-inputs.json](docs/external-inputs.json) for recorded input hashes, and [docs/LICENSE-STATUS.md](docs/LICENSE-STATUS.md) for remaining binary release review. Hashes identify specific files; they do not make sources available or grant redistribution rights.
 
 Public upstreams: [OpenOrbis](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain), [SDL](https://github.com/libsdl-org/SDL), [orbis-porting-kit](https://github.com/orbis-ports/orbis-porting-kit), [Mesa](https://docs.mesa3d.org/), [libdatachannel](https://github.com/paullouisageneau/libdatachannel), [Mbed TLS](https://github.com/Mbed-TLS/mbedtls), [Opus](https://github.com/xiph/opus).
+
+## Source archive packaging
+
+The Opus attribute file is adjusted to retain its metadata and version helper in source archives. Its upstream CRLF rules for Windows build files remain in effect. Application source manifests are generated from checkout/export bytes; regenerate them with `python3 tools/release/export-public-source.py --refresh-manifest` after intentional source changes.

@@ -1,8 +1,4 @@
-.gitignore		export-ignore
-.gitattributes		export-ignore
-
-update_version		export-ignore
-
+# PSBOX source packaging: retain metadata/version files in source archives.
 *.bat eol=crlf
 *.sln eol=crlf
 *.vcxproj eol=crlf

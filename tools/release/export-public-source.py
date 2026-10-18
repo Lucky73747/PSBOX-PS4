@@ -18,9 +18,40 @@ from public_tree import selected_files
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[2])
-    parser.add_argument('--output', type=Path, required=True)
+    destination = parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument('--output', type=Path)
+    destination.add_argument('--refresh-manifest', action='store_true',
+                             help='Regenerate the checkout manifest after all source checks')
     args = parser.parse_args()
-    root, dest = args.root.resolve(), args.output.absolute()
+    root = args.root.resolve()
+    if args.refresh_manifest:
+        spec = importlib.util.spec_from_file_location('public_check', Path(__file__).with_name('check-public-tree.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        errors, _ = module.check(root, verify_manifest=False)
+        if errors:
+            raise SystemExit('Source checks failed:\n' + '\n'.join(errors))
+        entries = []
+        for rel in selected_files(root):
+            if str(rel) == 'SOURCE-MANIFEST.json':
+                continue
+            data = (root / rel).read_bytes()
+            entries.append({'path': str(rel), 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
+        # File hashes identify the snapshot without exposing checkout ancestry.
+        base = None
+        manifest = {'format': 1, 'created_utc': datetime.now(timezone.utc).isoformat(),
+                    'application': 'PSBOX-PS4', 'scope': 'current selected source, including uncommitted changes',
+                    'history_included': False, 'base_commit_not_snapshot_commit': base, 'files': entries}
+        target = root / 'SOURCE-MANIFEST.json'
+        pending = root / 'SOURCE-MANIFEST.pending'
+        pending.write_text(json.dumps(manifest, indent=2)+'\n')
+        pending.replace(target)
+        errors, count = module.check(root)
+        if errors:
+            raise SystemExit('Manifest validation failed:\n' + '\n'.join(errors))
+        print(f'Refreshed manifest: {count} selected files. Nothing was published.')
+        return
+    dest = args.output.absolute()
     if dest.exists() or dest.is_symlink():
         parser.error('Output must not already exist; existing work is never overwritten')
     resolved_dest = dest.resolve()
@@ -53,8 +84,7 @@ def main():
             q.chmod(0o755 if before.st_mode & 0o111 else 0o644)
             entries.append({'path': str(rel), 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
         base = None
-        if (root / '.git').exists():
-            base = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+        # File hashes identify the snapshot without exposing checkout ancestry.
         manifest = {'format': 1, 'created_utc': datetime.now(timezone.utc).isoformat(),
                     'application': 'PSBOX-PS4', 'scope': 'current selected source, including uncommitted changes',
                     'history_included': False, 'base_commit_not_snapshot_commit': base, 'files': entries}
