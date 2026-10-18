@@ -1,9 +1,16 @@
+# Local-only notes, credentials, generated files and external SDK inputs
+/*privad*/
+*.local.md
 /build-*/
+/release-*/
 /dependencies/
 /dist/
 /logs/
+/reports/
+/public-*/
 *.pkg
 *.elf
+*.prx
 *.log
 *.ppm
 *.aus
@@ -13,7 +20,14 @@
 *.core
 account.json
 msa_refresh_token.txt
+autoplay.txt
 .env
 .env.*
 __pycache__/
 *.py[cod]
+.venv/
+venv/
+node_modules/
+.DS_Store
+/tools/ps4/ui-preview/preview*.png
+/tools/ps4/ps4-pc-manager/ps4-pc-manager.desktop

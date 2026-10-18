@@ -3,6 +3,7 @@
 #define _GNU_SOURCE 1
 #endif
 #include "video_decoder.h"
+#include "platform/ps4_build_info.h"
 #include "video_queue_policy.h"
 #include "video_decode_result.h"
 #include "native_thread_cpu.h"
@@ -27,6 +28,7 @@
 namespace xc::ps4 {
 namespace {
 
+constexpr const char* kBuild = xc::ps4::kBuildLabel;
 
 std::atomic<void (*)(const char*)> gVideoDiagnosticSink{nullptr};
 

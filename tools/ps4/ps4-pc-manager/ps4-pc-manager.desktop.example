@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PSBOX PS4 Manager
+Comment=Manage PS4 packages and capture PSBOX logs
+# Replace this example path with your local checkout location before installing.
+Exec=python3 /absolute/path/to/PSBOX-PS4/tools/ps4/ps4-pc-manager/app.py
+Terminal=false
+Categories=Utility;FileTransfer;

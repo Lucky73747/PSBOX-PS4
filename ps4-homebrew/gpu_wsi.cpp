@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Small Vulkan upload/present path for the PS4 homebrew bootstrap.
 #include "gpu_wsi.h"
+#include "platform/ps4_build_info.h"
 #include "native_thread_cpu.h"
 #include "gpu_video_shaders.h"
 #include "util/log.h"
@@ -55,6 +56,7 @@ void markPresentation(uint32_t stage) {
     gPresentationAtMs.store(sceKernelGetProcessTime()/1000u);
     gPresentationStage.store(stage);
 }
+constexpr const char* kBuild = xc::ps4::kBuildLabel;
 
 void logLine(const char* fmt, ...) {
     char body[768];

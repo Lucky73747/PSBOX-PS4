@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PSBOX | Estatísticas na tela</title>
+<!-- Fonte: no app final, troque por @font-face local (woff2) e ajuste cfg.font -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{color-scheme:dark;--ink:#f4f5f2;--mute:#c3c9c4;--ok:#7fd6a4;--warn:#f2c14e;--bad:#ff6b6b}
+html,body{margin:0;height:100%;background:transparent}
+
+/* ===== Base (OSD) ===== */
+#psb{position:fixed;z-index:10;display:none;bottom:calc(var(--my)*1px + env(safe-area-inset-bottom,0px));transform:scale(var(--scale));white-space:nowrap;font:600 calc(var(--fs)*1px)/var(--lh) var(--ff);font-variant-numeric:tabular-nums;color:var(--ink);padding:calc(var(--pad)*1px);border-radius:9px;background:rgb(10 12 11/var(--bg));--o:calc(var(--ol)*1px);--oc:rgb(0 0 0/.95);text-shadow:var(--o) 0 0 var(--oc),calc(var(--o)*-1) 0 0 var(--oc),0 var(--o) 0 var(--oc),0 calc(var(--o)*-1) 0 var(--oc),0 1px 4px rgb(0 0 0/.7)}
+#psb .lb{color:var(--mute);font-weight:500}
+#psb i{font-style:normal;color:var(--mute);font-weight:500;font-size:.85em}
+#psb em{font-style:normal;color:var(--mute);padding:0 .35em}
+#psb.acc b{color:var(--accent)}
+#psb .warn b{color:var(--warn)}
+#psb .bad b{color:var(--bad)}
+
+/* ===== Card ===== */
+#psb.v-card{display:none;flex-direction:column;gap:5px;text-align:left;border:1px solid #ffffff22;text-shadow:none;padding:calc(var(--pad)*1px) calc(var(--pad)*1.5px)}
+#psb .ch{display:flex;align-items:center;gap:.5em}
+#psb .dot{width:.55em;height:.55em;border-radius:50%;background:var(--ok);flex:none}
+#psb[data-w=warn] .dot{background:var(--warn)}
+#psb[data-w=bad] .dot{background:var(--bad)}
+#psb .ch i{font-size:.85em}
+#psb .cf{margin-left:auto;padding-left:1em;color:var(--ink)}
+#psb.v-card .cf.ok b{color:var(--accent)}
+#psb .cs{display:flex;align-items:flex-end;gap:.7em;border-top:1px solid #ffffff14;padding-top:4px}
+#psb u{text-decoration:none;font-size:.6em;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);width:3.4em;flex:none;padding-bottom:.2em}
+#psb .ct{display:flex;gap:.9em}
+#psb .ct>div{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:.2em}
+#psb small{flex-basis:100%;font-size:.68em;font-weight:500;color:var(--mute);line-height:1.1}
+
+/* ===== Opções ===== */
+#psb.nosub small,#psb.nosub .lb,#psb.notit u{display:none}
+</style>
+</head>
+<body>
+<div id="psb" aria-hidden="true"></div>
+
+<script>
+/*
+  PSBOX | Estatísticas na tela
+
+  API (window.psboxStats):
+    setStats({title,res,fps,rtt,loss,drop,dec,bitrate,cap,jitter})  atualiza os valores (chame a cada ~1 s)
+    setConfig(parcial)   altera a configuração (mescla; metrics e thr aceitam parciais)
+    getConfig()          devolve a configuração aplicada (para salvar no backend)
+    show() / hide()      mostra ou oculta
+    defaults             configuração padrão
+    onChange             callback opcional, chamado com a configuração após cada setConfig
+
+  Configuração:
+    scale, fs, lh, mx, my, pad, bg (transparência do fundo, 0 a 1), ol (contorno)
+    align: 'right' | 'left'          variant: 'card' | 'lines' | 'dense'
+    subtitles, titles, header: true | false
+    color: 'branco' | 'accent'       accent: '#rrggbb'       font: família CSS
+    metrics: { fps, rtt, br, loss, dec, drop, cad }  cada uma: 'on' | 'off' | 'alert'
+    thr: limites [aviso, crítico]  (fps: abaixo de; demais: a partir de)
+
+  Obs.: bitrate ('br') nunca entra em alerta, então em 'alert' fica oculto.
+*/
+(()=>{'use strict';
+const DEF={scale:1.2,fs:13,lh:1,mx:8,my:6,pad:8,bg:.9,ol:1.5,align:'right',variant:'card',
+ subtitles:true,titles:true,header:true,color:'branco',accent:'#a8c4cf',font:"Inter,system-ui,sans-serif",
+ metrics:{fps:'on',rtt:'on',br:'on',loss:'on',dec:'on',drop:'alert',cad:'alert'},
+ thr:{fps:[55,45],rtt:[60,100],loss:[.5,2],drop:[1,4],dec:[5,9],jit:[4,8]}};
+const clone=o=>JSON.parse(JSON.stringify(o));
+const cfg=clone(DEF);
+const stats={title:'Xbox Cloud',res:'720p',fps:59,rtt:18,loss:.1,drop:0,dec:1.6,bitrate:1.13,cap:8,jitter:.6};
+const el=document.getElementById('psb');
+let visible=true;
+
+const KEYS=['fps','rtt','br','loss','dec','drop','cad'];
+const LABEL={fps:'FPS',rtt:'Latência',br:'Bitrate',loss:'Perda',dec:'Decode',drop:'Perdidos',cad:'Cadência'};
+const GROUPS=[['Rede',['rtt','br','loss']],['Vídeo',['dec','drop','cad']]];
+const f=(n,d=1)=>Number(n).toFixed(d).replace('.',',');
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const up=(v,[w,b])=>v>=b?'bad':v>=w?'warn':'ok';
+function merge(t,p){for(const k in p){if(p[k]&&typeof p[k]==='object'&&!Array.isArray(p[k]))merge(t[k]=t[k]||{},p[k]);else t[k]=p[k]}return t}
+
+function render(){
+  const c=cfg,s=stats,T=c.thr,st=el.style,right=c.align==='right';
+  ['scale','fs','lh','mx','my','pad','bg','ol'].forEach(k=>st.setProperty('--'+k,c[k]));
+  st.setProperty('--ff',c.font);st.setProperty('--accent',c.accent);
+  st.right=right?'calc('+c.mx+'px + env(safe-area-inset-right,0px))':'auto';
+  st.left=right?'auto':'calc('+c.mx+'px + env(safe-area-inset-left,0px))';
+  st.transformOrigin=(right?'100%':'0')+' 100%';
+  st.textAlign=c.variant==='card'?'left':c.align;
+
+  const avg=1000/s.fps;
+  const M={
+    fps:{st:s.fps<T.fps[1]?'bad':s.fps<T.fps[0]?'warn':'ok',v:String(Math.round(s.fps)),u:c.subtitles?'':' FPS'},
+    rtt:{st:up(s.rtt,T.rtt),v:String(Math.round(s.rtt)),u:' ms'},
+    br:{st:'ok',v:f(s.bitrate,2)+'<i> / '+Math.round(s.cap)+'</i>',u:' Mbps'},
+    loss:{st:up(s.loss,T.loss),v:f(s.loss),u:'%'},
+    dec:{st:up(s.dec,T.dec),v:f(s.dec),u:' ms'},
+    drop:{st:up(s.drop,T.drop),v:String(Math.round(s.drop)),u:'/s'},
+    cad:{st:up(s.jitter,T.jit),v:f(avg)+'<i> / </i>'+f(avg+s.jitter),u:' ms'}
+  };
+  const all=Object.values(M).map(m=>m.st);
+  const worst=all.includes('bad')?'bad':all.includes('warn')?'warn':'ok';
+  const on=KEYS.filter(k=>c.metrics[k]==='on'||(c.metrics[k]==='alert'&&M[k].st!=='ok'));
+
+  el.className=[c.variant==='card'&&'v-card',c.color==='accent'&&'acc',!c.subtitles&&'nosub',!c.titles&&'notit'].filter(Boolean).join(' ');
+  el.dataset.w=worst;
+
+  const line=k=>'<span class="'+M[k].st+'"><span class="lb">'+LABEL[k]+': </span><b>'+M[k].v+'</b><i>'+M[k].u+'</i></span>';
+  let html='';
+  if(c.variant==='card'){
+    const tile=k=>'<div class="'+M[k].st+'"><small>'+LABEL[k]+'</small><b>'+M[k].v+'</b><i>'+M[k].u+'</i></div>';
+    const sec=([n,ks])=>{const t=ks.filter(k=>on.includes(k)).map(tile).join('');return t?'<div class="cs"><u>'+n+'</u><div class="ct">'+t+'</div></div>':''};
+    const head=c.header?'<div class="ch"><span class="dot"></span><b>'+esc(s.title)+'</b><i>'+esc(s.res)+'</i>'+(on.includes('fps')?'<span class="cf '+M.fps.st+'"><b>'+M.fps.v+'</b><i> FPS</i></span>':'')+'</div>':'';
+    html=head+GROUPS.map(sec).join('');
+  }else if(c.variant==='lines'){
+    html=on.map(k=>'<div>'+line(k)+'</div>').join('');
+  }else{
+    const h=Math.ceil(on.length/2);
+    html=[on.slice(0,h),on.slice(h)].filter(r=>r.length).map(r=>'<div>'+r.map(line).join('<em>·</em>')+'</div>').join('');
+  }
+  el.innerHTML=html;
+  st.display=(visible&&html)?(c.variant==='card'?'flex':'block'):'none';
+}
+
+function setStats(o){Object.assign(stats,o);render()}
+function setConfig(p){merge(cfg,p||{});render();if(api.onChange)api.onChange(clone(cfg))}
+const api={setStats,setConfig,getConfig:()=>clone(cfg),show(){visible=true;render()},hide(){visible=false;render()},defaults:clone(DEF),onChange:null};
+window.psboxStats=api;
+render();
+})();
+</script>
+</body>
+</html>

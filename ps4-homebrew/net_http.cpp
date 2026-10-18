@@ -2,6 +2,7 @@
 // Minimal net::perform bridge for the PS4 bootstrap. It uses the initialized
 // SceHttp/SceSsl contexts and keeps certificate verification enabled.
 #include "net/http.h"
+#include "platform/ps4_build_info.h"
 
 #include "network.h"
 #include "util/log.h"
@@ -19,6 +20,7 @@
 
 namespace xc::net {
 namespace {
+constexpr const char* kBuild = xc::ps4::kBuildLabel;
 std::mutex g_httpGateMutex;
 std::condition_variable g_httpGateChanged;
 size_t g_httpApiWaiters = 0;

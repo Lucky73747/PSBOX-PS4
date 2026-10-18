@@ -18,13 +18,16 @@ struct StreamMenuUiState {
     bool focusInPanel = true;
     bool fsrSettingsOpen = false;
     bool statsSettingsOpen = false;
+    bool newStatsUiEnabled = true;
     uint8_t statsSettingsPage = 0, statsSettingsRow = 0;
     StreamStatsUiConfig statsUiConfig{};
     bool fsrExperimentalUnlocked = false;
+    uint8_t statsMode = 2; // 0 off, 1 compact, 2 advanced.
     bool automaticReset = false;
     bool audioAvailable = false;
     bool nativeRcas = false;
     uint8_t activeCard = 0; // Stable IDs: 0=image, 1=controls, 2=volume, 3=configuration.
+                            // Visible/navigation order: image, volume, configuration, controls, followed by exit (ID 4).
     uint8_t settingsRow = 0;
     uint8_t fsrSettingsRow = 0;
     std::string requestedTier = "720";
@@ -35,6 +38,7 @@ struct StreamMenuUiState {
     uint32_t upscaler = 1;
     uint32_t rcasSharpness = 4;
     uint32_t fsrScaleFactor = 2;
+    uint32_t frameWait = 1;
     uint32_t volume = 100;
     uint32_t width = 0;
     uint32_t height = 0;
@@ -50,7 +54,10 @@ struct StreamMenuUiAnimation {
         uint32_t duration = 0, delay = 0;
         bool initialized = false;
     };
+    // 0–49: content selectors; 50–79: five dock buttons and panels.
     // Selector tracks must never overlap panel opening/opacity/height tracks.
+    std::array<Track, 80> tracks{};
+    std::array<StreamMenuUiState, 5> panels{};
     uint64_t volumePulseStarted = 0;
     uint32_t lastVolume = 100;
     bool volumeObserved = false;

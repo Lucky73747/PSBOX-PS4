@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 RafaelNGP
 #include "stream/stream_session.h"
+#include "platform/ps4_build_info.h"
 
 #include "stream/h264_receiver.h"
 #include "stream/rtcp_reporter.h"
@@ -41,6 +42,7 @@ constexpr const char* kClientAppInstallId = "c97d7ee0-73b2-4239-bf1d-9d805a33842
 // SystemUiType of the system UIs this client draws itself.
 constexpr int kShowVirtualKeyboard = 10;
 
+constexpr const char* kBuildLabel = xc::ps4::kBuildLabel;
 constexpr const char* kSctpTracePath = "/data/PSBOX/sctp-flow-v50.log";
 constexpr size_t kSctpTraceCapacity = 128;
 constexpr size_t kSctpTraceLineSize = 768;
@@ -322,6 +324,8 @@ struct StreamSession::Impl {
         v.set("content", content.dump());
         v.set("id", id);
         v.set("cv", "");
+        const bool accepted = sendText(message, v.dump());
+        XC_LOGI("message transaction_complete local_accepted=%u server_confirmation=unavailable", accepted ? 1u : 0u);
     }
 
     void cancelTransaction(const std::string& id) {

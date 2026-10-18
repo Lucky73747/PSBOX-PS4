@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD_DIR="${PSBOX_BUILD_DIR:-$ROOT/build-ps4-homebrew}"
 BUILD_JOBS="${PSBOX_BUILD_JOBS:-2}"
+DEFAULT_BUILD_NUMBER="$(tr -d '\r\n' < "$ROOT/BUILD_NUMBER")"
+PSBOX_BUILD_NUMBER="${PSBOX_BUILD_NUMBER:-$DEFAULT_BUILD_NUMBER}"
 SDK_BUNDLE="${PS4_ORBIS_SDK_BUNDLE:-$ROOT/dependencies/orbis-sdk-v1/orbis-sdk-v1}"
 OO_TOOLCHAIN="${OO_PS4_TOOLCHAIN:-$ROOT/dependencies/OpenOrbis-PS4-Toolchain}"
 ORBIS_KIT="${ORBIS_KIT_DIR:-$ROOT/dependencies/orbis-porting-kit}"
@@ -16,6 +18,7 @@ LLVM_BIN="${PSBOX_LLVM_BIN:-/usr/lib/llvm-21/bin}"
 
 case "${1:-}" in
   --help|-h)
+    printf 'Usage: %s [--check-inputs]\nSee BUILD-PREREQUISITES.md for input path overrides.\n' "$0"
     exit 0 ;;
   ''|--check-inputs) ;;
   *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -36,8 +39,10 @@ for path in \
   "$ORBIS_MESA_BUILD/src/amd/vulkan/libvulkan_radeon.a" \
   "$ROOT/deps/opus/CMakeLists.txt" \
   "$ROOT/THIRD_PARTY_NOTICES.md" \
+  "$ROOT/licenses/README.md"; do
   if [[ ! -e "$path" ]]; then
     printf 'Missing PS4 build input: %s\n' "$path" >&2
+    printf 'Install the compatible external inputs listed in DEPENDENCIES.md first.\n' >&2
     exit 2
   fi
 done
@@ -73,6 +78,8 @@ cmake -S "$ROOT/ps4-homebrew" -B "$BUILD_DIR" -G Ninja \
   -DORBIS_MESA_BUILD="$ORBIS_MESA_BUILD" \
   -DORBIS_KIT_DIR="$ORBIS_KIT" \
   -DXC_PS4_SDL3_SOURCE="$SDL_SOURCE" \
+  -DXC_PS4_SDL3_BUILD="$SDL_BUILD" \
+  -DPSBOX_BUILD_NUMBER="$PSBOX_BUILD_NUMBER"
 
 ninja -C "$BUILD_DIR" -j"$BUILD_JOBS" xcloud_homebrew
 PKG_PATH="$BUILD_DIR/XCHM00001.pkg"

@@ -1,6 +1,20 @@
 # Isolated PS4 homebrew bootstrap for the Xbox Cloud UI.
 # Configure with the paired OpenOrbis/Mesa SDK bundle and its porting kit.
 cmake_minimum_required(VERSION 3.20)
+set(_xc_repo_root "${CMAKE_CURRENT_LIST_DIR}/..")
+file(STRINGS "${_xc_repo_root}/VERSION" PSBOX_VERSION LIMIT_COUNT 1)
+file(STRINGS "${_xc_repo_root}/BUILD_NUMBER" PSBOX_BUILD_NUMBER_DEFAULT LIMIT_COUNT 1)
+if(NOT PSBOX_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  message(FATAL_ERROR "VERSION must contain a semantic version such as 0.1.0")
+endif()
+if(NOT PSBOX_BUILD_NUMBER_DEFAULT MATCHES "^[0-9]+$")
+  message(FATAL_ERROR "BUILD_NUMBER must contain a numeric build number")
+endif()
+project(psbox_ps4 VERSION "${PSBOX_VERSION}" LANGUAGES C CXX)
+set(PSBOX_BUILD_NUMBER "${PSBOX_BUILD_NUMBER_DEFAULT}" CACHE STRING "PSBOX source build number")
+if(NOT PSBOX_BUILD_NUMBER MATCHES "^[0-9]+$")
+  message(FATAL_ERROR "PSBOX_BUILD_NUMBER must be numeric")
+endif()
 
 if(NOT PS4 OR NOT ORBIS_COMPAT_DIR)
   message(FATAL_ERROR "Use the paired orbis-sdk.cmake toolchain; this target must not build as a host app")
@@ -120,6 +134,7 @@ add_executable(xcloud_homebrew
   ../src/stream/input_packet.cpp
   ../src/platform/ps4_homebrew_clock.cpp
   ../src/platform/ps4_homebrew_file.cpp
+  system_keyboard.cpp
   ../extern/qrcodegen/qrcodegen.c)
 target_include_directories(xcloud_homebrew PRIVATE
   ../src
@@ -132,6 +147,8 @@ target_include_directories(xcloud_homebrew PRIVATE
   "${_vkloader_dir}"
   "${_xc_repo_root}/deps/libdatachannel/include"
   "${ORBIS_MESA_SRC}/include")
+target_compile_definitions(xcloud_homebrew PRIVATE
+  "PSBOX_BUILD_LABEL=\"PSBOX-PS4-v${PROJECT_VERSION}-build${PSBOX_BUILD_NUMBER}\"")
 # Keep the RADV archive whole so the linked ICD retains its entry points. The
 # explicit -Wl form is required by the Clang 21 driver in this workspace.
 target_link_options(xcloud_homebrew PRIVATE "-Wl,--wrap=sceVideoOutSubmitFlip")
@@ -178,6 +195,7 @@ if(COMMAND ps4_create_pkg)
   ps4_create_pkg(xcloud_homebrew
     TITLE_ID XCHM00001
     TITLE "PSBOX"
+    VERSION 02.07
     CONTENT_LABEL PSBOXPS4
     ICON "${CMAKE_CURRENT_LIST_DIR}/../assets/ps4/icon0.png"
     EXTRA_FILES

@@ -17,6 +17,7 @@ constexpr std::array<uint8_t, 4> kImagePresetRows{0, 2, kBitratePresetRow, 4};
 constexpr std::array<uint8_t, 5> kImageCustomRows{0, 2, kBitratePresetRow, 1, 4};
 constexpr std::array<uint8_t, 5> kConfigurationRows{6, 7, 8, 5, 3};
 // Stable card IDs, arranged in the one authoritative visible and navigation order.
+constexpr std::array<uint8_t, 5> kDockCardOrder{0, 2, 3, 1, 4}; // image, volume, configuration, controls, exit
 float mix(float a, float b, float t) { return a + (b - a) * t; }
 Color fade(Color c, float a) {
     return withAlpha(c, static_cast<uint8_t>(alphaOf(c) * std::clamp(a, 0.0f, 1.0f)));
@@ -126,6 +127,9 @@ void icon(Painter& p, unsigned kind, float x, float y, Color color, float scale=
             q.c.strokeArc(q.X(12),q.Y(12),5*q.sx,1.9f*q.sx,-.65f,1.3f,fade(color,q.alpha));
             q.c.strokeArc(q.X(12),q.Y(12),9*q.sx,1.9f*q.sx,-.65f,1.3f,fade(color,q.alpha));
         }
+    } else if (kind == 4) {
+        q.line(12,3,12,12,color,2.2f);
+        q.c.strokeArc(q.X(12),q.Y(13),8*q.sx,2.2f*q.sx,-1.0f,5.14f,fade(color,q.alpha));
     } else {
         q.line(4,8,6,8,color); q.line(12,8,20,8,color);
         q.line(4,16,12,16,color); q.line(18,16,20,16,color);
@@ -361,6 +365,7 @@ void statsSettings(Panel& p) {
     p.p.text("Voltar",138,footerY+3,12,kMuted);
 }
 float height(unsigned card,const StreamMenuUiState& s) {
+    if(card==4) return 150;
     if(card==0) return s.fsrSettingsOpen ? (s.fsrExperimentalUnlocked?403:310) :
         (s.bitrateCustom ? 416 : 356);
     if(card==1) return 410;
@@ -382,17 +387,21 @@ uint8_t streamMenuNextRow(uint8_t card,uint8_t current,int direction,bool bitrat
         const int n=int(rows.size()),i=int(it-rows.begin());
         return rows[size_t((i+(direction<0?n-1:direction>0?1:0))%n)];
     };
+    if(card==4) return 0;
     if(card==3) return next(kConfigurationRows);
     return bitrateCustom?next(kImageCustomRows):next(kImagePresetRows);
 }
 uint8_t streamMenuNextCard(uint8_t card,int direction) {
+    const auto it=std::find(kDockCardOrder.begin(),kDockCardOrder.end(),std::min<uint8_t>(card,4));
     const int index=it==kDockCardOrder.end()?0:static_cast<int>(it-kDockCardOrder.begin());
+    const int next=(index+(direction<0?4:direction>0?1:0))%static_cast<int>(kDockCardOrder.size());
     return kDockCardOrder[static_cast<size_t>(next)];
 }
 void drawStreamMenuUi(Canvas& c,Fonts& f,const StreamMenuUiState& s,uint64_t now,
                       float visibility,float fsrPageProgress,float cardProgress,StreamMenuUiAnimation* m) {
     (void)fsrPageProgress;(void)cardProgress;
     visibility=std::clamp(visibility,0.0f,1.0f);
+    const unsigned active=std::min<unsigned>(s.activeCard,4);
     if(m) {
         m->panels[active]=s;
         if (!m->volumeObserved) {
@@ -405,18 +414,27 @@ void drawStreamMenuUi(Canvas& c,Fonts& f,const StreamMenuUiState& s,uint64_t now
     }
     auto visualIndex=[](unsigned card) {
         const auto it=std::find(kDockCardOrder.begin(),kDockCardOrder.end(),
+                                 static_cast<uint8_t>(std::min(card,4u)));
         return it==kDockCardOrder.end()?0u:static_cast<unsigned>(it-kDockCardOrder.begin());
     };
     const float w=float(c.width()),h=float(c.height());
+    const float dockScale=std::max(.6f,std::min(h/900,(w-24)/376));
     // Same sizing formula as fit() in the pinned HTML (max scroll height ~400px).
     const float bottom=std::clamp(h*.022f,12.0f,26.0f);
     float panelScale=std::sqrt(.13f*w*h/(380*400.0f));
     panelScale=std::min({panelScale,(w-24)/380,(h-bottom-16-76*dockScale)/400});
     panelScale=std::max(.3f,panelScale)*.75f;
+    const float dockX=(w-376*dockScale)/2,dockY=h-bottom-64*dockScale;
+    for(unsigned order=0;order<5;++order) {
+        const unsigned i=(active+1+order)%5; // active panel paints last during overlaps
         const bool open=s.panelOpen&&i==active;
+        const float progress=tween(m,50+i,open?1.0f:0.0f,now,420,false,0,true);
+        const float opacity=tween(m,55+i,open?1.0f:0.0f,now,open?220:180,false,0,true);
+        const float content=tween(m,60+i,open?1.0f:0.0f,now,open?240:120,false,open?120:0,true);
         if(opacity<.001f) continue;
         const auto& pane=m?m->panels[i]:s;
         const float targetHeight=height(i,pane);
+        const float ph=tween(m,65+i,targetHeight,now,420,false);
         const float sx=panelScale*mix(.35f,1,progress),sy=panelScale*mix(.2f,1,progress);
         const float center=std::clamp(dockX+(32+78*visualIndex(i))*dockScale,12+190*panelScale,w-12-190*panelScale);
         const float pulse= m && m->volumePulseStarted && now>=m->volumePulseStarted && now-m->volumePulseStarted<360
@@ -430,19 +448,30 @@ void drawStreamMenuUi(Canvas& c,Fonts& f,const StreamMenuUiState& s,uint64_t now
         Panel p{frame,pane,m,now};
         if(i==0) {if(pane.fsrSettingsOpen) fsr(p,c.width(),c.height());else image(p);}
         else if(i==1) controls(p); else if(i==2) volume(p);
+        else if(i==4) {
+            p.group("Encerrar sessão cloud",1);
+            const float y=p.row("Confirmar saída",0);
+            padButton(p.p,PadButton::Cross,323,y+15);
+            p.p.text("O jogo será desconectado.",18,p.y+12,13,kMuted);
+        }
         else if(pane.statsSettingsOpen) statsSettings(p); else configuration(p);
         c.resetClip();
     }
     const float pulse= m && m->volumePulseStarted && now>=m->volumePulseStarted && now-m->volumePulseStarted<360
         ? std::sin(3.14159265f*float(now-m->volumePulseStarted)/360.0f) : 0.0f;
     Painter dock{c,f,dockX,dockY-5.0f*pulse,dockScale,dockScale,visibility};
+    for(unsigned pos=0;pos<5;++pos) {
         const unsigned i=kDockCardOrder[pos];
+        const float on=tween(m,75+i,s.panelOpen&&i==active?1.0f:0.0f,now,220,false);
+        const float focused=tween(m,70+i,!s.focusInPanel&&i==active?1.0f:0.0f,now,180,false);
         const float x=78.0f*pos;
         if(focused>.001f) {
             dock.stroke(x-5.5f,-5.5f,75,75,fade(kAccent,focused),2.5f,19.5f);
             dock.stroke(x-3,-3,70,70,fade(rgba(16,18,17),focused),3,17);
         }
+        dock.fill(x,0,64,64,(i==4?blend(rgba(116,35,39),rgba(195,53,61),on):blend(rgba(32,35,33),kAccent,on)),14);
         dock.stroke(x,0,64,64,blend(rgba(62,66,63),kAccent,on),1,14);
+        icon(dock,i,x+17.5f,17.5f,(i==4?kText:blend(rgba(229,233,230),kOnAccent,on)),29.0f/24,
              i==2 && s.volume==0);
     }
 }

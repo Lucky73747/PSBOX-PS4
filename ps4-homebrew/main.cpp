@@ -14,6 +14,7 @@
 #include "ui/app_ui.h"
 #include "ui/image_cache.h"
 #include "video_decoder.h"
+#include "platform/ps4_build_info.h"
 #include "audio_player.h"
 #include "stream_menu_ui.h"
 #include "video_repeat_watchdog.h"
@@ -45,9 +46,11 @@
 #include <sys/stat.h>
 #include <thread>
 #include <condition_variable>
+#include <deque>
 #include <vector>
 
 namespace {
+constexpr const char* kBuild = xc::ps4::kBuildLabel;
 constexpr const char* kLogDirectory = "/data/PSBOX";
 constexpr const char* kAppLogPath = "/data/PSBOX/xcloud.log";
 
@@ -70,9 +73,11 @@ struct StreamProfile {
     uint32_t frameRate = 60;
     bool automaticVideoReset = false;
     uint32_t upscaler = 1; // 0 bilinear, 1 FSR1, 2 native 1:1 output.
+    uint32_t frameWait = 1;
     uint32_t rcasSharpness = 4; // Maximum RCAS sharpness.
     bool nativeRcas = false; // Experimental: apply RCAS at native 1080p.
     uint32_t fsrScaleFactor = 2; // Experimental 2x EASU intermediate, then downsample.
+    uint8_t statsMode = 2; // 0 off, 1 compact, 2 advanced.
     bool newStatsUiEnabled = true; // Current renderer; diagnostic legacy remains an internal fallback.
     xc::ps4::StreamStatsUiConfig statsUiConfig{};
     uint32_t lastQueueMax = 0;
@@ -108,19 +113,24 @@ StreamProfile loadStreamProfile() {
     StreamProfile profile;
     std::string text;
     if (!xc::platform::readFile(kStreamProfilePath, text)) {
+        logLine("stream profile cache miss path=%s default=v3-720 bitrate=3000000 fps=60 fsr=1 stats=advanced-card frame_wait=1 reset=off", kStreamProfilePath);
         return profile;
     }
     std::string error;
     auto parsed = xc::json::parse(text, &error);
+    // Version 3 establishes the 720p60/3 Mbps/FSR1 defaults, advanced card stats, +1 frame and no auto reset.
     // Older saved profiles reset once; later user changes are saved as v2 and
     // remain authoritative for subsequent sessions.
+    if (!parsed || (*parsed)["version"].asInt() != 3 ||
         ((*parsed)["tier"].str() != "720" && (*parsed)["tier"].str() != "1080")) {
+        logLine("stream profile cache reset reason=%s default=v3-720 bitrate=3000000 fps=60 fsr=1 stats=advanced-card frame_wait=1 reset=off",
                 parsed ? "older_or_unsupported_version" : (error.empty() ? "missing_or_invalid" : error.c_str()));
         return profile;
     }
     profile.tier = (*parsed)["tier"].str();
     profile.frameRate = (*parsed)["frame_rate"].asInt() == 30 ? 30 : 60;
     profile.upscaler = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["gpu_upscaler"].asInt(1), 0, 2));
+    profile.frameWait = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["frame_wait"].asInt(1), 0, 1));
     profile.rcasSharpness = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["fsr_rcas_sharpness"].asInt(2), 0, 4));
     profile.nativeRcas = (*parsed)["fsr_native_rcas_experimental"].asBool(false);
     profile.fsrScaleFactor = (*parsed)["fsr_scale_factor"].asInt(1) == 2 ? 2 : 1;
@@ -128,6 +138,7 @@ StreamProfile loadStreamProfile() {
     const int64_t storedStatsMode = (*parsed)["stats_mode"].asInt(-1);
     profile.statsMode = storedStatsMode >= 0 && storedStatsMode <= 2
         ? static_cast<uint8_t>(storedStatsMode)
+        : ((*parsed)["show_advanced_stats"].asBool(true) ? 2 : 0);
     profile.newStatsUiEnabled = (*parsed)["new_stats_ui"].asBool(true);
     xc::ps4::readStreamStatsUiConfig((*parsed)["stats_osd"], profile.statsUiConfig);
     if(!profile.newStatsUiEnabled) {
@@ -158,6 +169,7 @@ StreamProfile loadStreamProfile() {
 
 bool saveStreamProfile(const StreamProfile& profile) {
     xc::json::Value value = xc::json::Value::object();
+    value.set("version", 3);
     value.set("tier", profile.tier);
     value.set("frame_rate", static_cast<int64_t>(profile.frameRate));
     value.set("automatic_video_reset", profile.automaticVideoReset);
@@ -192,6 +204,7 @@ bool saveStreamProfile(const StreamProfile& profile) {
 
 enum class LoginStage {
     Starting, CheckingSaved, Refreshing, ShowingCode, XboxLive, Xcloud, Library,
+    SessionStarting, SessionProvisioning, SessionReady, Streaming, SessionStopping, Failed, Expired, Denied
 };
 
 const char* loginStageName(LoginStage stage) {
@@ -207,6 +220,7 @@ const char* loginStageName(LoginStage stage) {
     case LoginStage::SessionProvisioning: return "session-provisioning";
     case LoginStage::SessionReady: return "session-ready";
     case LoginStage::Streaming: return "streaming";
+    case LoginStage::SessionStopping: return "session-stopping";
     case LoginStage::Failed: return "failed";
     case LoginStage::Expired: return "expired";
     case LoginStage::Denied: return "denied";
@@ -497,6 +511,8 @@ struct LoginState {
     std::shared_ptr<xc::xcloud::GssvClient> gssv;
     std::string refreshToken;
     std::string sessionMessage;
+    std::deque<xc::stream::TextInputRequest> pendingTextInputs;
+    std::deque<std::string> cancelledTextInputs;
     bool stopSessionRequested = false;
     bool streamTransportLost = false;
     std::string streamTier = "720";
@@ -693,6 +709,8 @@ bool finishXboxLogin(LoginState& state, xc::auth::MsaTokens& msaTokens) {
             {
                 std::lock_guard<std::mutex> lock(state.mutex);
                 mediaActive = state.stage == LoginStage::SessionStarting ||
+                    state.stage == LoginStage::SessionProvisioning || state.stage == LoginStage::Streaming ||
+                    state.stage == LoginStage::SessionStopping;
             }
             if (!mediaActive) break;
             if (!paused) { logLine("library background pagination paused for active stream"); paused = true; }
@@ -923,6 +941,20 @@ void* sessionWorker(void* opaque) {
                     (void)audioPlayer->enqueue(data, size, timestamp);
                 };
             }
+            const bool systemKeyboard = xc::platform::systemKeyboardAvailable();
+            logLine("keyboard capability system_dialog=%u advertised=%u", systemKeyboard?1u:0u, systemKeyboard?1u:0u);
+            if (systemKeyboard) {
+                callbacks.textInput = [&state](const xc::stream::TextInputRequest& req) {
+                    std::lock_guard<std::mutex> lock(state.mutex);
+                    state.pendingTextInputs.push_back(req);
+                    ++state.generation;
+                    logLine("keyboard request queued scope=%d max_length=%d",req.inputScope,req.maxLength);
+                };
+                callbacks.textInputCancelled = [&state](const std::string& id) {
+                    std::lock_guard<std::mutex> lock(state.mutex);
+                    state.cancelledTextInputs.push_back(id);
+                };
+            }
             callbacks.closed = [&state](const std::string& reason, bool recoverable) {
                 bool userRequested = false;
                 {
@@ -965,6 +997,7 @@ void* sessionWorker(void* opaque) {
             }
 
             updateSession(state, LoginStage::Streaming,
+                          "Touchpad opens Guide. Hold Options to open settings.");
             {
                 std::lock_guard<std::mutex> lock(state.mutex);
                 state.streamTransportLost = false;
@@ -992,6 +1025,9 @@ void* sessionWorker(void* opaque) {
             logLine("WebRTC connected; waiting for H.264 pictures and controller reports");
             logLine("video_scaler policy=vulkan_nv12_preferred cpu_fallback=available actual_path_in_stream_metrics=1");
             bool requestedStop = false;
+            bool keyboardOpen = false;
+            bool keyboardReleasePending = false;
+            std::string keyboardRequestId;
             uint64_t nextGamepadAt = sceKernelGetProcessTime() / 1000u;
 
             uint64_t nextPerformanceCheckAt = nextGamepadAt;
@@ -1035,6 +1071,7 @@ void* sessionWorker(void* opaque) {
             bool decoderResetLatched = false;
             uint64_t xboxGuideUntil = 0;
             bool transportLostNotified = false;
+            logLine("GAMEPAD TX enabled source=scePad poll_thread=controller_input_worker poll_target_ms=4 send_thread=gamepad_sender send_policy=every_new_sample guide=TOUCHPAD rising_edge guide_pulse_ms=250 exit=dock_confirm_only");
             uint64_t lastPerformanceGeneration = 0;
             uint64_t performanceWindows = 0;
             uint32_t pressureWindows = 0;
@@ -1231,7 +1268,56 @@ void* sessionWorker(void* opaque) {
                 }
                 if (requestedStop) break;
                 const uint64_t now = sceKernelGetProcessTime() / 1000u;
+                if (keyboardOpen) {
+                    std::string typed;
+                    const auto keyboardStatus=xc::platform::pollSystemKeyboard(typed);
+                    if (keyboardStatus!=xc::platform::KeyboardStatus::Open) {
+                        if (keyboardStatus==xc::platform::KeyboardStatus::Accepted) {
+                            stream.completeTextInput(keyboardRequestId,typed);
+                            logLine("keyboard response prepared utf8_bytes=%zu; channel acceptance logged separately",typed.size());
+                        } else {
+                            stream.cancelTextInput(keyboardRequestId);
+                            logLine("keyboard response cancelled");
+                        }
+                        keyboardRequestId.clear();keyboardOpen=false;
+                        keyboardReleasePending=true;
+                    }
+                }
+                if (keyboardReleasePending && (!job->controller ||
+                    (!job->controller->button(SDL_GAMEPAD_BUTTON_SOUTH) &&
+                     !job->controller->button(SDL_GAMEPAD_BUTTON_EAST) &&
+                     !job->controller->button(SDL_GAMEPAD_BUTTON_START)))) {
+                    keyboardReleasePending=false;
+                    inputMuted.store(settingsOpen, std::memory_order_release);
+                    // Consume dialog confirmation edges before returning input to the game/menu.
+                    previousCross=previousCircle=false;
+                    logLine("keyboard input ownership returned after button release");
+                }
+                if (!keyboardOpen && !keyboardReleasePending) {
+                    xc::stream::TextInputRequest request;
+                    bool haveRequest=false;
+                    { std::lock_guard<std::mutex> lock(state.mutex);
+                      if(!state.pendingTextInputs.empty()){request=std::move(state.pendingTextInputs.front());state.pendingTextInputs.pop_front();haveRequest=true;} }
+                    if(haveRequest){
+                        xc::platform::KeyboardKind kind=xc::platform::KeyboardKind::Text;
+                        if(request.inputScope==1)kind=xc::platform::KeyboardKind::Url;
+                        else if(request.inputScope==5)kind=xc::platform::KeyboardKind::Email;
+                        else if(request.inputScope==29||request.inputScope==32)kind=xc::platform::KeyboardKind::Number;
+                        else if(request.inputScope==31)kind=xc::platform::KeyboardKind::Password;
+                        const size_t maxLength=request.maxLength>0?static_cast<size_t>(request.maxLength):2048;
+                        inputMuted.store(true, std::memory_order_release);
+                        if(xc::platform::openSystemKeyboard(request.title,request.defaultText,maxLength,kind)){
+                            keyboardRequestId=request.id;keyboardOpen=true;
+                            logLine("keyboard opened scope=%d max_length=%d; stream gamepad forwarding paused",request.inputScope,request.maxLength);
+                        }else{
+                            stream.cancelTextInput(request.id);
+                            inputMuted.store(settingsOpen, std::memory_order_release);
+                            logLine("keyboard open failed; text request cancelled");
+                        }
+                    }
+                }
                 const bool streamOpen = stream.isOpen();
+                if (!keyboardOpen && !keyboardReleasePending && now >= nextGamepadAt) {
                     workerStep(2);
                     workerStep(3);
                     const bool options = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_START);
@@ -1401,6 +1487,22 @@ void* sessionWorker(void* opaque) {
                             state.streamBitrateCap = value.maxBitrate;
                             ++state.generation;
                         };
+                        if (menuCard == 4 && cross && !previousCross) {
+                            {
+                                std::lock_guard<std::mutex> lock(state.mutex);
+                                state.stopSessionRequested = true;
+                                state.sessionMessage = "Leaving the cloud stream...";
+                                state.streamSettingsOpen = false;
+                                state.streamFsrSettingsOpen = false;
+                                state.streamStatsSettingsOpen = false;
+                                state.stage = LoginStage::SessionStopping;
+                                ++state.generation;
+                            }
+                            inputMuted.store(false, std::memory_order_release);
+                            requestedStop = true;
+                            logLine("stream exit requested via=dock_exit_confirm shutdown=stream_worker");
+                            break;
+                        } else if (menuCard == 0 && triangle && !previousTriangle && !fsrUnlockChord) {
                             fsrSettingsOpen = !fsrSettingsOpen;
                             fsrSettingsRow = 0;
                             fsrExperimentalUnlocked = false;
@@ -1704,6 +1806,7 @@ void* sessionWorker(void* opaque) {
                             std::lock_guard<std::mutex> lock(state.mutex);
                             if (!state.streamTransportLost) {
                                 state.streamTransportLost = true;
+                                state.sessionMessage = "Video paused: transport disconnected. Last frame retained; open Options and use the red exit button to leave.";
                                 ++state.generation;
                             }
                         }
@@ -1852,6 +1955,7 @@ void* sessionWorker(void* opaque) {
                 sceKernelUsleep(4000);
             }
             stopInputPoll.store(true, std::memory_order_release);
+            inputMuted.store(false, std::memory_order_release);
             stopGamepadSender.store(true, std::memory_order_release);
             sendStateChanged.notify_all();
             maintenanceStop.store(true);
@@ -2009,6 +2113,7 @@ struct DrawContext {
     xc::ui::AppUi* ps5Ui = nullptr;
     xc::ps4::VideoDecoder* video = nullptr;
     xc::ui::ImageCache* imageCache = nullptr;
+    std::shared_ptr<const xc::ui::Image> loadingBanner;
     LoginStage previousStage = LoginStage::Starting;
     uint32_t previousButtons = 0;
     bool previousL2 = false;
@@ -2196,10 +2301,23 @@ size_t jumpToAdjacentInitial(const std::vector<xc::xcloud::Title>& titles, size_
     return current;
 }
 
+void drawLoginScreen(xc::ui::Canvas& canvas, xc::ui::Fonts& fonts, const LoginSnapshot& s, const xc::ui::Image* banner = nullptr) {
     using namespace xc::ui;
     static const std::vector<xc::xcloud::Title> kNoTitles;
     const auto& titles = s.visibleTitles ? *s.visibleTitles : kNoTitles;
+    const bool loadingGame = s.stage == LoginStage::SessionStarting ||
+        s.stage == LoginStage::SessionProvisioning || s.stage == LoginStage::SessionReady ||
+        s.stage == LoginStage::Streaming;
+    canvas.clear(rgba(24, 27, 25));
+    if (loadingGame && banner) {
+        canvas.drawImage(*banner, 0, 0);
+        canvas.fillRect({0, 0, 1920, 1080}, rgba(0, 0, 0, 145));
+        canvas.gradientH({0, 0, 1920, 1080}, rgba(0, 0, 0, 140), rgba(0, 0, 0, 0));
+    } else {
+        drawBrandMark(canvas, 1430.0f, 450.0f, 170.0f, rgba(238, 239, 236));
+    }
     fonts.bold.draw(canvas, "PSBOX", 150, 235, 68, rgba(255, 255, 255));
+    canvas.fillRect({150, 345, 82, 8}, rgba(168, 196, 207), 4);
     const bool inLibrary = s.stage == LoginStage::Library || s.stage == LoginStage::SessionStarting ||
                            s.stage == LoginStage::SessionProvisioning || s.stage == LoginStage::SessionReady;
     fonts.semibold.draw(canvas, inLibrary ? "Choose a cloud game" : "Sign in with your Microsoft account",
@@ -2324,6 +2442,12 @@ size_t jumpToAdjacentInitial(const std::vector<xc::xcloud::Title>& titles, size_
                                    rgba(190, 200, 190));
             break;
         }
+        case LoginStage::SessionStopping:
+            fonts.semibold.draw(canvas, "Closing cloud session...", 150, 535, 34, rgba(255, 205, 116));
+            fonts.regular.draw(canvas, s.sessionMessage.c_str(), 150, 590, 23, rgba(205, 215, 205));
+            fonts.regular.draw(canvas, "The library will return when the session has stopped.",
+                               150, 650, 22, rgba(190, 200, 190));
+            break;
         case LoginStage::Streaming:
             fonts.semibold.draw(canvas, s.streamTransportLost ? "Stream paused; app remains open" : "Connecting to the video stream",
                                 150, 535, 34, s.streamTransportLost ? rgba(255, 205, 116) : rgba(140, 235, 145));
@@ -2347,6 +2471,8 @@ size_t jumpToAdjacentInitial(const std::vector<xc::xcloud::Title>& titles, size_
     canvas.strokeRect({150, 900, 760, 72}, rgba(71, 118, 73, 255), 2, 14);
     const char* footer = s.stage == LoginStage::Library ? "Up/Down: browse    L1/R1: previous/next letter    X: request session" :
                          s.stage == LoginStage::SessionReady ? "Circle: return to library" :
+                         s.stage == LoginStage::Streaming ? "Touchpad: Guide    Hold Options 1s: settings    Triangle: FSR options" :
+                         s.stage == LoginStage::SessionStopping ? "Closing session; please wait" :
                          s.stage == LoginStage::Failed && !titles.empty() ? "Circle: return to library" :
                          s.stage == LoginStage::SessionProvisioning || s.stage == LoginStage::SessionStarting
                              ? "Keep the app open while the cloud session is prepared" :
@@ -2511,6 +2637,8 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
     if (context.video) { context.video->setPresentationFps(state.streamFrameRate); context.video->setPlayoutDelayFrames(state.streamFrameWait); }
     const bool enteringStream = context.previousStage != LoginStage::Streaming &&
                                 state.stage == LoginStage::Streaming;
+    if ((context.previousStage == LoginStage::Streaming || context.previousStage == LoginStage::SessionStopping) &&
+        state.stage == LoginStage::Library && context.ps5Ui) {
         context.ps5Ui->showHome();
         context.ps5Ui->showTab(xc::ui::Tab::Library);
         context.ps5Ui->invalidate();
@@ -2722,6 +2850,8 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
                 step < 8 ? stepNames[step] : "unknown", static_cast<unsigned long long>(stepAge), performance.decoderCpu);
             legacy.rows[6]=cpu;
             const char* controls = state.streamTransportLost
+                ? "Last frame held. Open Options and select the red exit button to return to the library."
+                : "Touchpad: Guide   Hold Options 1s: settings   L3+R3 (1s): reset video";
             legacy.controls=controls;
             xc::ps4::drawStreamLegacyStatsUi(*context.canvas,*context.fonts,legacy);
                 }
@@ -2738,6 +2868,7 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
         if (gpuVideoEnabled) return {gpuVideoEnabled && enteringStream, false, true, nullptr, state.streamFrameRate, state.streamUpscaler, state.streamRcasSharpness, state.streamNativeRcas, state.streamFsrScaleFactor, state.streamTier == "1080"};
         if (state.generation != context.lastGeneration || (settingsShouldDraw &&
             (settingsAnimationActive || pageAnimationActive || menuCardAnimationActive || dockAnimation.active(now)))) {
+            drawLoginScreen(*context.canvas, *context.fonts, state, context.loadingBanner.get());
             if (settingsShouldDraw) xc::ps4::drawStreamMenuUi(*context.canvas, *context.fonts, makeStreamMenuUiState(state),
                 now, settingsVisibility, settingsPageProgress, menuCardProgress, &dockAnimation);
             context.lastGeneration = state.generation;
@@ -2788,6 +2919,11 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
         }
         const auto event = context.ps5Ui->handle(nav);
         if (event.action == xc::ui::Action::Play) {
+            // Retain already-resident artwork before HTTP is paused for Play.
+            // Cache lookup queues misses asynchronously; never wait or decode here.
+            context.loadingBanner = context.imageCache && !event.game.heroUrl.empty()
+                ? context.imageCache->get(event.game.heroUrl, 1920, 1080, xc::ui::ImagePriority::Hero)
+                : nullptr;
             beginCloudSession(*context.state, event.game, context.video, context.controller);
         }
         if (context.ps5Ui->needsRedraw(now)) {
@@ -2863,6 +2999,7 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
     }
 
     if (state.generation == context.lastGeneration) return {};
+    drawLoginScreen(*context.canvas, *context.fonts, state, context.loadingBanner.get());
     context.lastGeneration = state.generation;
     logLine("login canvas state changed stage=%d qr=%s manual_code=visible",
             static_cast<int>(state.stage),

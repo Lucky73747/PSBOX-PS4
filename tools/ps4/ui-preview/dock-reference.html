@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PSBOX | Menu rápido</title>
+<style>
+:root{color-scheme:dark;--accent:#a8c4cf;--on-accent:#172126;--ink:#eeefec;--mute:#b1b5b1;--line:#ffffff16;--card:#ffffff08;--pw:380px;--ease:cubic-bezier(.22,1,.36,1);--cubic-out:cubic-bezier(.215,.61,.355,1);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:transparent;color:var(--ink)}
+.stage{position:relative;min-height:100vh;overflow:hidden;background:transparent}
+
+/* Dock de quadradinhos (só controle, sem mouse) */
+.dock{position:absolute;z-index:3;left:50%;bottom:clamp(12px,2.2vh,26px);transform:translateX(-50%) scale(var(--s,1));transform-origin:50% 100%}
+.triggers{display:flex;gap:14px}
+.trigger{cursor:pointer;width:64px;height:64px;border-radius:14px;border:1px solid #ffffff24;background:#202321;color:#e5e9e6;display:grid;place-items:center;box-shadow:0 4px 14px #0006;transition:background 220ms var(--ease),color 220ms var(--ease),border-color 220ms var(--ease),box-shadow 180ms var(--ease)}
+.trigger svg,.mute svg{width:26px;height:26px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.trigger svg{width:29px;height:29px}
+.trigger[aria-expanded=true]{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+.trigger.is-focus{box-shadow:0 0 0 3px #101211,0 0 0 5.5px var(--accent),0 4px 14px #0006}
+
+/* Painéis: crescem para cima a partir do quadradinho */
+.panel{--dx:0px;position:absolute;left:calc(50% - var(--pw)/2);bottom:76px;width:var(--pw);display:flex;flex-direction:column;border:1px solid #ffffff1f;border-radius:16px;background:#181b19;border-color:#444a46;backdrop-filter:none;box-shadow:none;transform-origin:50% 100%;transform:translate(var(--dx),10px) scale(calc(.35*var(--pr,1)),calc(.2*var(--pr,1)));opacity:0;visibility:hidden;transition:transform 420ms var(--ease),opacity 180ms ease,visibility 0s linear 420ms}
+.panel.open{transform:translate(var(--dx),0) scale(var(--pr,1));opacity:1;visibility:visible;transition:transform 420ms var(--ease),opacity 220ms ease,visibility 0s}
+.panel[data-i="0"]{--dx:-117px}
+.panel[data-i="1"]{--dx:-39px}
+.panel[data-i="2"]{--dx:39px}
+.panel[data-i="3"]{--dx:117px}
+.scroll{padding:14px;opacity:0;transform:translateY(8px);transition:opacity 120ms ease,transform 220ms var(--ease)}
+.panel.open .scroll{opacity:1;transform:none;transition:opacity 240ms ease 120ms,transform 380ms var(--ease) 120ms}
+
+/* Grupos */
+.group{margin-top:11px}
+.scroll>.group:first-child{margin-top:0}
+.group h2{margin:0 0 6px 4px;font-size:13px;letter-spacing:.01em;text-transform:none;color:var(--mute);font-weight:600}
+.card{border-radius:12px;background:var(--card);border:1px solid var(--line);overflow:hidden}
+.row{cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:10px 12px;min-height:48px;font-size:15px;transition:background 150ms var(--cubic-out),box-shadow 150ms var(--cubic-out)}
+.row+.row{border-top:1px solid var(--line)}
+.row small{display:block;margin-top:2px;font-size:12px;color:var(--mute)}
+.row[hidden]{display:none}
+#stats{flex-direction:column;align-items:stretch;gap:8px}
+#stats .seg{width:100%}
+#stats .seg button{flex:1;min-width:0;white-space:nowrap}
+#sens,#dead{flex-direction:column;align-items:stretch;gap:8px}
+#sens .seg,#dead .seg{width:100%}
+#sens .seg button,#dead .seg button{flex:1;min-width:0;padding-inline:6px;white-space:nowrap}
+#sens .seg button:last-child,#dead .seg button:last-child{flex:0 0 auto;min-width:104px;padding-inline:8px}
+.row.is-focus{background:#ffffff0d;box-shadow:inset 0 0 0 2px var(--accent)}
+
+/* Seletor segmentado com indicador deslizante */
+.seg{position:relative;display:flex;gap:2px;padding:3px;border-radius:8px;background:#090b0a;flex:none}
+.seg .thumb{position:absolute;top:3px;bottom:3px;left:0;border-radius:6px;background:var(--accent)}
+.seg.ready .thumb{transition:transform 150ms var(--cubic-out),width 150ms var(--cubic-out)}
+.seg button{cursor:pointer;position:relative;z-index:1;border:0;background:none;border-radius:6px;padding:7px 11px;min-width:42px;font:inherit;font-size:14px;font-weight:600;color:var(--mute);transition:color 150ms var(--cubic-out)}
+.seg button.sq{min-width:0;width:30px;padding:0;display:grid;place-items:center}
+.seg button.sq svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.seg button[aria-checked=true]{color:var(--on-accent)}
+
+/* Volume */
+.row.vol{gap:14px}
+.mute{width:38px;height:38px;flex:none;display:grid;place-items:center;border-radius:10px;background:#ffffff0c}
+.mute svg{width:22px;height:22px}
+.val.w{width:70px}
+.val{width:44px;text-align:right;font-size:15px;font-weight:700;font-variant-numeric:tabular-nums}
+input[type=range]{cursor:pointer;--v:80%;flex:1;min-width:0;height:6px;-webkit-appearance:none;appearance:none;border-radius:99px;background:linear-gradient(90deg,var(--accent) var(--v),#ffffff24 var(--v))}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 2px 8px #0008}
+input[type=range]::-moz-range-thumb{width:20px;height:20px;border:0;border-radius:50%;background:#fff;box-shadow:0 2px 8px #0008}
+
+.stats{position:absolute;z-index:2;top:clamp(56px,8vh,84px);right:clamp(20px,5vw,72px);padding:8px 12px;border-radius:10px;background:#181b19;border:1px solid #ffffff1a;font-size:clamp(12px,1.1vw,17px);font-variant-numeric:tabular-nums;opacity:0;transform-origin:100% 0;transform:translateY(-6px) scale(var(--st,1));transition:opacity 200ms var(--cubic-out),transform 200ms var(--cubic-out);pointer-events:none;text-shadow:none}
+.stats.on{opacity:1;transform:scale(var(--st,1))}
+.stats.f{width:min(320px,calc(100vw - 32px));max-height:calc(100vh - 120px);overflow:auto}
+.stats div{display:flex;justify-content:space-between;gap:22px;padding:2px 0}
+.stats span{color:var(--mute)}
+.stats b{color:var(--accent);font-weight:700}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{transition-duration:.01ms!important;animation-duration:.01ms!important}}
+</style>
+</head>
+<body>
+<main class="stage">
+
+<div class="stats" id="statsbox" aria-hidden="true"></div>
+
+<nav class="dock" aria-label="Menu rápido">
+  <div class="triggers">
+    <div class="trigger" aria-label="Imagem" aria-expanded="true"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2.5"/><path d="M9 20h6M12 17v3"/></svg></div>
+    <div class="trigger" aria-label="Controles" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M7 6h10a4 4 0 0 1 4 4v3a4 4 0 0 1-7 2.6L13 14h-2l-1 1.6A4 4 0 0 1 3 13v-3a4 4 0 0 1 4-4z"/><path d="M8 9v4M6 11h4M16 10h.01M18 12h.01"/></svg></div>
+    <div class="trigger" aria-label="Volume" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 9.5v5h3.5L12 18V6L7.5 9.5z"/><path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M18 6.5a8 8 0 0 1 0 11"/></svg></div>
+    <div class="trigger" aria-label="Configurações" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M4 8h2M12 8h8M4 16h8M18 16h2"/><circle cx="9" cy="8" r="3"/><circle cx="15" cy="16" r="3"/></svg></div>
+  </div>
+
+  <section class="panel open" data-i="0" aria-label="Imagem"><div class="scroll">
+    <div class="group"><h2>Qualidade</h2><div class="card">
+      <div class="row" id="res" data-nav data-kind="seg"><span>Resolução</span><div class="seg" role="radiogroup" aria-label="Resolução"><button tabindex="-1" role="radio" aria-checked="true">720p</button><button tabindex="-1" role="radio" aria-checked="false">1080p</button></div></div>
+      <div class="row" id="fps" data-nav data-kind="seg"><span>Taxa de quadros</span><div class="seg" role="radiogroup" aria-label="Taxa de quadros"><button tabindex="-1" role="radio" aria-checked="false">30</button><button tabindex="-1" role="radio" aria-checked="true">60</button></div></div>
+    </div></div>
+    <div class="group"><h2>Rede</h2><div class="card">
+      <div class="row" id="bw" data-nav data-kind="seg"><span>Limite de banda<small>Mbps</small></span><div class="seg" role="radiogroup" aria-label="Limite de banda"><button tabindex="-1" role="radio" aria-checked="false">3</button><button tabindex="-1" role="radio" aria-checked="false">10</button><button tabindex="-1" role="radio" aria-checked="true">30</button><button class="sq" tabindex="-1" role="radio" aria-checked="false" aria-label="Personalizado"><svg viewBox="0 0 24 24"><path d="M4 8h2M12 8h8M4 16h8M18 16h2"/><circle cx="9" cy="8" r="3"/><circle cx="15" cy="16" r="3"/></svg></button></div></div>
+      <div class="row vol" id="custom" data-nav data-kind="range" hidden><span>Personalizado</span><input id="cust" type="range" min="1" max="50" value="15" tabindex="-1" aria-label="Limite personalizado"><span class="val w" id="cval">15 Mbps</span></div>
+    </div></div>
+    <div class="group"><h2>Aprimoramento</h2><div class="card">
+      <div class="row" data-nav data-kind="seg"><span>Filtro de imagem</span><div class="seg" role="radiogroup" aria-label="Filtro de imagem"><button tabindex="-1" role="radio" aria-checked="false">Bilinear</button><button tabindex="-1" role="radio" aria-checked="true">FSR 1</button></div></div>
+    </div></div>
+  </div></section>
+
+  <section class="panel" data-i="1" aria-label="Controles"><div class="scroll">
+    <div class="group"><h2>Analógicos</h2><div class="card">
+      <div class="row" id="sens" data-nav data-kind="seg"><span>Sensibilidade</span><div class="seg" role="radiogroup" aria-label="Sensibilidade"><button tabindex="-1" role="radio" aria-checked="false">Baixa</button><button tabindex="-1" role="radio" aria-checked="true">Média</button><button tabindex="-1" role="radio" aria-checked="false">Alta</button><button tabindex="-1" role="radio" aria-checked="false">Personalizado</button></div></div>
+      <div class="row vol" id="sensCustom" data-nav data-kind="range" data-range="sens" hidden><span>Personalizado</span><input id="sensRange" type="range" min="0" max="100" step="5" value="50" tabindex="-1" aria-label="Sensibilidade personalizada"><span class="val" id="sensValue">50%</span></div>
+      <div class="row" id="dead" data-nav data-kind="seg"><span>Zona morta</span><div class="seg" role="radiogroup" aria-label="Zona morta"><button tabindex="-1" role="radio" aria-checked="false">Baixa</button><button tabindex="-1" role="radio" aria-checked="true">Média</button><button tabindex="-1" role="radio" aria-checked="false">Alta</button><button tabindex="-1" role="radio" aria-checked="false">Personalizado</button></div></div>
+      <div class="row vol" id="deadCustom" data-nav data-kind="range" data-range="dead" hidden><span>Personalizado</span><input id="deadRange" type="range" min="0" max="50" step="1" value="10" tabindex="-1" aria-label="Zona morta personalizada"><span class="val" id="deadValue">10%</span></div>
+    </div></div>
+    <div class="group"><h2>Menu rápido</h2><div class="card">
+      <div class="row" data-nav data-kind="seg"><span>Segurar OPTIONS</span><div class="seg" role="radiogroup" aria-label="Segurar OPTIONS"><button tabindex="-1" role="radio" aria-checked="false">0,3 s</button><button tabindex="-1" role="radio" aria-checked="true">0,5 s</button><button tabindex="-1" role="radio" aria-checked="false">1 s</button><button tabindex="-1" role="radio" aria-checked="false">2 s</button></div></div>
+    </div></div>
+    <div class="group"><h2>Resposta</h2><div class="card">
+      <div class="row" data-nav data-kind="seg"><span>Vibração</span><div class="seg" role="radiogroup" aria-label="Vibração"><button tabindex="-1" role="radio" aria-checked="false">Desligada</button><button tabindex="-1" role="radio" aria-checked="true">Ligada</button></div></div>
+    </div></div>
+  </div></section>
+
+  <section class="panel" data-i="2" aria-label="Volume"><div class="scroll">
+    <div class="group"><h2>Saída</h2><div class="card">
+      <div class="row vol" data-nav data-kind="vol"><span class="mute" id="mute"></span><input id="vol" type="range" min="0" max="100" value="80" tabindex="-1" aria-label="Volume"><span class="val" id="val">80%</span></div>
+    </div></div>
+  </div></section>
+  <section class="panel" data-i="3" aria-label="Configurações"><div class="scroll">
+    <div class="group"><h2>Na tela</h2><div class="card">
+      <div class="row" id="stats" data-nav data-kind="seg"><span>Estatísticas</span><div class="seg" role="radiogroup" aria-label="Estatísticas"><button tabindex="-1" role="radio" aria-checked="true">Oculta</button><button tabindex="-1" role="radio" aria-checked="false">Compacta</button><button tabindex="-1" role="radio" aria-checked="false">Completa</button></div></div>
+    </div></div>
+  </div></section>
+</nav>
+</main>
+
+<script>
+(()=>{'use strict';
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
+const triggers=$$('.trigger'),panels=$$('.panel'),dock=$('.dock');
+let mod=0,open=true,inPanel=false,row=0;
+const mult={tb:1,box:.75,st:1};
+const rowsOf=i=>[...panels[i].querySelectorAll('[data-nav]:not([hidden])')];
+const sb=$('#statsbox'),custom=$('#custom'),cust=$('#cust'),cval=$('#cval');
+const customRanges={sens:$('#sensRange'),dead:$('#deadRange')};
+function setCust(n){n=Math.max(1,Math.min(50,Number(n)));cust.value=n;cust.style.setProperty('--v',((n-1)/49*100)+'%');cval.textContent=n+' Mbps'}
+function setCustomRange(id,n){const input=customRanges[id],min=+input.min,max=+input.max;n=Math.max(min,Math.min(max,Number(n)));input.value=n;input.style.setProperty('--v',((n-min)/(max-min)*100)+'%');$('#'+id+'Value').textContent=n+'%'}
+function sync(){
+  let changed=false;
+  const bw=$('#bw .seg'),showBandwidth=btns(bw)[cur(bw)].classList.contains('sq');
+  if(custom.hidden===showBandwidth){custom.hidden=!showBandwidth;changed=true}
+  for(const [id,rowId] of [['sens','sensCustom'],['dead','deadCustom']]){
+    const g=$('#'+id+' .seg'),selected=btns(g)[cur(g)].textContent.trim()==='Personalizado',r=$('#'+rowId);
+    if(r.hidden===selected){r.hidden=!selected;changed=true}
+  }
+  if(inPanel)row=Math.min(row,rowsOf(mod).length-1);
+  if(changed)fit();
+}
+
+function render(){
+  sync();stats();emit();
+  panels.forEach((p,n)=>{const o=open&&n===mod;p.classList.toggle('open',o);p.inert=!o});
+  triggers.forEach((t,n)=>{t.setAttribute('aria-expanded',String(open&&n===mod));t.classList.toggle('is-focus',!inPanel&&n===mod)});
+  panels.forEach((p,pn)=>rowsOf(pn).forEach((r,n)=>r.classList.toggle('is-focus',inPanel&&pn===mod&&n===row)));
+}
+
+// Seletores segmentados com indicador deslizante
+const segs=$$('.seg'),btns=g=>[...g.querySelectorAll('button')],cur=g=>btns(g).findIndex(b=>b.getAttribute('aria-checked')==='true');
+function place(g){const b=btns(g)[cur(g)],t=g.querySelector('.thumb');t.style.width=b.offsetWidth+'px';t.style.transform='translateX('+b.offsetLeft+'px)'}
+function pick(g,i,wrap){const b=btns(g);i=wrap?(i+b.length)%b.length:Math.max(0,Math.min(b.length-1,i));b.forEach((x,n)=>x.setAttribute('aria-checked',String(n===i)));place(g)}
+segs.forEach(g=>{const t=document.createElement('span');t.className='thumb';g.prepend(t)});
+const placeAll=()=>segs.forEach(place);
+
+// Volume
+const vol=$('#vol'),val=$('#val'),mute=$('#mute');let prev=80;
+const SPK='<path d="M4 9.5v5h3.5L12 18V6L7.5 9.5z"/>',W1='<path d="M15.5 9a4 4 0 0 1 0 6"/>',W2='<path d="M18 6.5a8 8 0 0 1 0 11"/>';
+function setVol(n){
+  n=Math.max(0,Math.min(100,Number(n)));vol.value=n;vol.style.setProperty('--v',n+'%');val.textContent=n+'%';
+  mute.innerHTML='<svg viewBox="0 0 24 24">'+SPK+(n===0?'<path d="M16 9.5l5 5M21 9.5l-5 5"/>':n<40?W1:W1+W2)+'</svg>';
+  if(n>0)prev=n;
+}
+
+// Estatísticas na tela (valores iniciais de exemplo; o app atualiza via psboxMenu.setStats)
+const live={bitrate:'18 Mbps',lat:'28 ms',loss:'0,1%',dec:'4 ms'};
+const selTxt=id=>{const g=$('#'+id+' .seg');return btns(g)[cur(g)].textContent.trim()};
+function stats(){
+  const m=selTxt('stats'),fps=selTxt('fps'),res=selTxt('res');
+  sb.className='stats'+(m==='Oculta'?'':' on '+(m==='Compacta'?'c':'f'));
+  sb.innerHTML=m==='Compacta'?'<b>'+fps+'</b> FPS · '+live.lat
+    :['Resolução|'+res,'Quadros|'+fps+' FPS','Bitrate|'+live.bitrate,'Latência|'+live.lat,'Perda|'+live.loss,'Decodificação|'+live.dec].map(l=>{const [a,b]=l.split('|');return '<div><span>'+a+'</span><b>'+b+'</b></div>'}).join('');
+}
+// Ações do controle: up, down, left, right, ok (✕), back (○)
+function press(a){
+  if(!inPanel){
+    if(a==='left'||a==='right'){if(!open)open=true;else mod=(mod+(a==='right'?1:-1)+triggers.length)%triggers.length}
+    else if(a==='up'||a==='ok'){if(!open)open=true;else{inPanel=true;row=a==='ok'?0:rowsOf(mod).length-1}}
+    else open=false;
+  }else{
+    const rows=rowsOf(mod),k=rows[row].dataset.kind;
+    if(a==='up')row=Math.max(0,row-1);
+    else if(a==='down'){if(row===rows.length-1)inPanel=false;else row++}
+    else if(a==='back')inPanel=false;
+    else if(k==='seg'){const g=rows[row].querySelector('.seg'),i=cur(g);pick(g,a==='left'?i-1:a==='right'?i+1:i+1,a==='ok')}
+    else if(k==='vol'){if(a==='left')setVol(vol.value-5);else if(a==='right')setVol(+vol.value+5);else setVol(+vol.value===0?prev:0)}
+    else if(k==='range'){
+      const input=rows[row].querySelector('input[type=range]'),delta=Number(input.step)||1;
+      if(a==='left'||a==='right'){
+        const next=Number(input.value)+(a==='right'?delta:-delta),id=rows[row].dataset.range;
+        if(id)setCustomRange(id,next);else setCust(next);
+      }
+    }
+  }
+  render();
+}
+// Mouse (para testar no PC): mesmo caminho do controle
+triggers.forEach((t,i)=>t.addEventListener('click',()=>{inPanel=false;if(open&&mod===i)open=false;else{mod=i;open=true}render()}));
+panels.forEach((p,pn)=>p.querySelectorAll('[data-nav]').forEach(r=>r.addEventListener('click',e=>{
+  mod=pn;open=true;inPanel=true;row=rowsOf(pn).indexOf(r);
+  const b=e.target.closest('.seg button');
+  if(b){const g=b.parentElement;pick(g,btns(g).indexOf(b))}
+  else if(r.dataset.kind==='vol'&&e.target.closest('.mute'))setVol(+vol.value===0?prev:0);
+  render();
+})));
+vol.addEventListener('input',()=>setVol(vol.value));
+cust.addEventListener('input',()=>{setCust(cust.value);render()});
+for(const [id,input] of Object.entries(customRanges))input.addEventListener('input',()=>{setCustomRange(id,input.value);render()});
+window.focus();
+const KEYS={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',Enter:'ok',' ':'ok',Escape:'back',Backspace:'back'};
+document.addEventListener('keydown',e=>{const a=KEYS[e.key];if(a){e.preventDefault();press(a)}});
+
+// Escala: a toolbar acompanha a altura da tela; a caixa ocupa ~13% da área, a 75% (mult.box)
+const TARGET=0.13;
+function fit(){
+  const p=panels[0],nw=p.offsetWidth,nh=Math.max(...panels.map(q=>q.firstElementChild.scrollHeight))+2,W=innerWidth,H=innerHeight,b=parseFloat(getComputedStyle(dock).bottom)||0;
+  const ks=Math.max(.6,Math.min(H/900,(W-24)/290));
+  let kp=Math.sqrt(TARGET*W*H/(nw*nh));
+  kp=Math.min(kp,(W-24)/nw,(H-b-16-76*ks)/nh);
+  const ksf=ks*mult.tb,kpf=Math.max(.3,kp)*mult.box;
+  dock.style.setProperty('--s',ksf.toFixed(3));
+  dock.style.setProperty('--pr',(kpf/ksf).toFixed(3));
+  // cada caixa fica centrada no seu ícone, sem sair da tela
+  const lim=Math.max(0,(W/2-12-nw*kpf/2)/ksf);
+  panels.forEach((q,n)=>q.style.setProperty('--dx',Math.max(-lim,Math.min(lim,[-117,-39,39,117][n]))+'px'));
+}
+addEventListener('resize',()=>{fit();placeAll()});
+if(document.fonts&&document.fonts.ready)document.fonts.ready.then(()=>{fit();placeAll()});
+
+// ===== API para o app (controle, configurações por usuário, estatísticas) =====
+const CUSTOM='Limite personalizado (Mbps)',lbl=b=>b.classList.contains('sq')?'Personalizado':b.textContent.trim();
+let last=null;
+function getSettings(){
+  const o={};segs.forEach(g=>{o[g.getAttribute('aria-label')]=lbl(btns(g)[cur(g)])});
+  o[CUSTOM]=+cust.value;o['Sensibilidade personalizada']=+customRanges.sens.value;o['Zona morta personalizada']=+customRanges.dead.value;o['Volume']=+vol.value;return o;
+}
+function setSettings(o){
+  segs.forEach(g=>{const k=g.getAttribute('aria-label');if(!(k in o))return;const i=btns(g).findIndex(b=>lbl(b)===o[k]);if(i>=0)pick(g,i)});
+  if(CUSTOM in o)setCust(o[CUSTOM]);
+  if('Sensibilidade personalizada' in o)setCustomRange('sens',o['Sensibilidade personalizada']);
+  if('Zona morta personalizada' in o)setCustomRange('dead',o['Zona morta personalizada']);
+  if('Volume' in o)setVol(o['Volume']);render();
+}
+function emit(){
+  const o=getSettings(),j=JSON.stringify(o),first=last===null;if(j===last)return;last=j;
+  if(!first&&window.psboxMenu&&window.psboxMenu.onChange)window.psboxMenu.onChange(o);
+}
+window.psboxMenu={press,getSettings,setSettings,setStats:o=>{Object.assign(live,o);stats()},onChange:null};
+fit();placeAll();setVol(80);setCust(15);setCustomRange('sens',50);setCustomRange('dead',10);render();
+requestAnimationFrame(()=>requestAnimationFrame(()=>segs.forEach(g=>g.classList.add('ready'))));
+})();
+</script>
+</body>
+</html>

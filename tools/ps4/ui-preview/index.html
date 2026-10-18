@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PSBOX · Preview da UI de stream</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="stage" aria-label="Prévia do menu de stream PSBOX">
+    <div class="scene">
+      <div class="sun"></div><div class="mountain mountain-back"></div><div class="mountain mountain-front"></div>
+      <div class="terrain"></div><div class="character"><i></i></div>
+      <header class="game-hud">
+        <div class="game-mark"><span class="mark-dot"></span> CLOUD PLAY <small>STREAMING</small></div>
+        <div class="hud-right"><span class="connection"><i></i> CONEXÃO ESTÁVEL</span><span>59 FPS</span></div>
+      </header>
+      <div class="toast">Elder Realms <span>Exploração · Capítulo 04</span></div>
+    </div>
+
+    <section class="overlay" aria-label="Menu rápido">
+      <div class="overlay-head">
+        <div><p class="eyebrow"><span class="pulse"></span> MENU RÁPIDO <span class="divider">/</span> SEGURE OPTIONS</p>
+          <h1>O que você quer ajustar?</h1></div>
+        <button class="close" aria-label="Fechar menu" title="Fechar (Esc)">×</button>
+      </div>
+      <div class="cards">
+        <article class="card is-selected" data-card="settings" tabindex="0" aria-expanded="true" title="Selecionar para expandir">
+          <div class="card-top"><span class="icon">☷</span><span class="card-index">01</span></div>
+          <h2>Configurações</h2><p class="card-description">Qualidade e resposta do stream</p>
+          <div class="card-summary">720p <span>·</span> 60 FPS <span>·</span> FSR <span class="expand-arrow">⌄</span></div>
+          <div class="card-details"><div class="settings-list">
+            <button class="setting-row" data-setting="resolution"><span>Resolução</span><b>720p <small>›</small></b></button>
+            <button class="setting-row" data-setting="fps"><span>Taxa de quadros</span><b>60 FPS <small>›</small></b></button>
+            <button class="setting-row" data-setting="bitrate"><span>Limite REMB</span><b>30 Mbps <small>›</small></b></button>
+            <button class="setting-row" data-setting="filter"><span>Filtro</span><b>FSR · EASU + RCAS <small>›</small></b></button>
+          </div>
+          <div class="card-hint"><kbd>←</kbd><kbd>→</kbd> navegar <span>·</span> <kbd>×</kbd> ajustar</div></div>
+        </article>
+
+        <article class="card" data-card="controls" tabindex="0" aria-expanded="false" title="Selecionar para expandir">
+          <div class="card-top"><span class="icon">⌘</span><span class="card-index">02</span></div>
+          <h2>Controles</h2><p class="card-description">Atalhos disponíveis nesta sessão</p>
+          <div class="card-summary">OPTIONS + ○ <span>·</span> sair do jogo <span class="expand-arrow">⌄</span></div>
+          <div class="card-details"><div class="control-list">
+            <div class="control-row"><span class="controller-key">✕</span><span>Selecionar / confirmar</span></div>
+            <div class="control-row"><span class="controller-key">○</span><span>Voltar / cancelar</span></div>
+            <div class="control-row"><span class="controller-key">OPTIONS</span><span>Menu rápido</span></div>
+            <div class="control-row"><span class="controller-key">OPTIONS + ○</span><span>Sair do jogo</span></div>
+          </div>
+          <div class="card-hint"><span class="status-dot"></span> Controle conectado <span class="muted">· remapeamento futuro</span></div></div>
+        </article>
+
+        <article class="card" data-card="volume" tabindex="0" aria-expanded="false" title="Selecionar para expandir">
+          <div class="card-top"><span class="icon">♫</span><span class="card-index">03</span></div>
+          <h2>Volume</h2><p class="card-description">Áudio do jogo · ajuste local</p>
+          <div class="card-summary"><span class="summary-speaker">◖))</span> <span id="volumeSummary">80% · áudio ativo</span><span class="expand-arrow">⌄</span></div>
+          <div class="card-details"><div class="volume-box">
+            <div class="volume-value"><span class="speaker" id="speaker">◖))</span><strong id="volumeValue">80<small>%</small></strong></div>
+            <input id="volume" type="range" min="0" max="100" value="80" aria-label="Volume do jogo">
+            <div class="range-labels"><span>0</span><span>50</span><span>100</span></div>
+            <button class="mute-button" id="muteButton"><span id="muteIcon">◖))</span><span id="muteLabel">Silenciar áudio</span><kbd>M</kbd></button>
+          </div>
+          <div class="card-hint">Altera o volume do stream neste console</div></div>
+        </article>
+      </div>
+      <footer class="overlay-footer"><span><kbd>OPTIONS</kbd> fechar <span class="footer-dot">·</span> alterações de qualidade aplicadas ao confirmar</span><span class="preview-tag">WIREFRAME INTERATIVO</span></footer>
+    </section>
+    <div class="dev-note"><span class="live-dot"></span> PREVIEW LOCAL <span>CSS hot reload ativo</span></div>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

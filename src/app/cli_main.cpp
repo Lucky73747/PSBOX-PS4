@@ -1,0 +1,813 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RafaelNGP
+// Host (Linux) command-line front end, used to validate sign-in, the title
+// list and session provisioning on a PC before running on the console.
+//
+//   xcloud-cli login            sign in (device code) and show the profile
+//   xcloud-cli titles [--recent] list streamable titles with names
+//   xcloud-cli provision <id>   start a session, wait until it can be
+//                               connected, run /connect, then stop it
+//   xcloud-cli stream <id> [seconds] [out.h264]
+//                               provision, connect WebRTC, receive video
+//                               (optionally dumped as Annex-B H.264)
+//   xcloud-cli bench-decode <file.h264> [threads]
+//                               decode speed of a dumped stream
+//   xcloud-cli ui-preview <dir>  render the menus to PNGs with live data
+//   xcloud-cli render-icon <out.png> [size]
+//                               the PS5 home-screen icon (icon0.png: 512)
+//   xcloud-cli logout
+#include "app/library.h"
+#include "app/updater.h"
+#include "auth/auth_manager.h"
+#include "media/decoder.h"
+#include "net/http.h"
+#include "util/json.h"
+#include "stream/stream_session.h"
+#include "platform/platform.h"
+#include "util/log.h"
+#include "ui/app_ui.h"
+#include "ui/brand.h"
+#include "ui/stream_menu.h"
+#include "ui/strings.h"
+#include "xcloud/gssv.h"
+#include "xcloud/prices.h"
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_STATIC
+#include "stb_image_write.h"
+
+#include <atomic>
+#include <thread>
+#include <mutex>
+#include <map>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <strings.h>
+#include <string>
+#include <vector>
+
+using namespace xc;
+
+namespace {
+
+int usage() {
+    std::fprintf(stderr,
+                 "usage: xcloud-cli [-v] <command>\n"
+                 "  login                 sign in with a Microsoft account\n"
+                 "  titles [--recent]     list streamable titles\n"
+                 "  provision <titleId>   provision a cloud session, then stop it\n"
+                 "  stream <titleId> [seconds] [out.h264]\n"
+                 "                        provision and stream; dump video to a file\n"
+                 "  bench-decode <file.h264> [threads]\n"
+                 "                        measure H.264 decode speed\n"
+                 "  ui-preview <dir>      render every menu screen to <dir>/*.png\n"
+                 "  render-icon <out.png> [size]  draw the app icon (512 for icon0.png)\n"
+                 "  logout                forget the stored account\n");
+    return 2;
+}
+
+void showCode(const auth::DeviceCode& dc) {
+    std::printf("\n==============================================\n");
+    std::printf("  On your phone or PC, open:  %s\n", dc.verificationUri.c_str());
+    std::printf("  and enter the code:         %s\n", dc.userCode.c_str());
+    std::printf("==============================================\n\n");
+    std::fflush(stdout);
+}
+
+bool signIn(auth::AuthManager& am, xcloud::GssvClient& gssv) {
+    std::string err;
+    if (!am.signIn(gssv, showCode, err)) {
+        XC_LOGE("%s", err.c_str());
+        return false;
+    }
+    std::printf("Signed in as %s (xuid %s), region %s\n", am.profile().gamertag.c_str(),
+                am.profile().xuid.c_str(), gssv.region().name.c_str());
+    return true;
+}
+
+int cmdTitles(auth::AuthManager& am, bool recent) {
+    xcloud::GssvClient gssv;
+    if (!signIn(am, gssv)) return 1;
+    std::vector<xcloud::Title> titles;
+    std::string err;
+    if (!gssv.listTitles(titles, err, recent)) {
+        XC_LOGE("%s", err.c_str());
+        return 1;
+    }
+    std::string market = gssv.session().market.empty() ? "US" : gssv.session().market;
+    if (!gssv.hydrateTitles(titles, market, "en-us", err)) XC_LOGW("%s", err.c_str());
+    for (const auto& t : titles)
+        std::printf("%-28s %-14s %s %s\n", t.titleId.c_str(), t.productId.c_str(), t.hasEntitlement ? "owned" : "-    ",
+                    t.name.empty() ? "?" : t.name.c_str());
+    std::printf("%zu titles\n", titles.size());
+    return 0;
+}
+
+// Starts a session for `titleId` and waits until it is Provisioned (queue,
+// then /connect with the console-transfer token).
+bool provision(auth::AuthManager& am, xcloud::GssvClient& gssv, const std::string& titleId) {
+    std::string err;
+    if (!gssv.startSession(titleId, "en-US", err)) {
+        XC_LOGE("%s", err.c_str());
+        return false;
+    }
+    bool connected = false;
+    for (int i = 0; i < 600; ++i) {  // up to ~10 minutes of queue
+        xcloud::SessionStatus st;
+        if (!gssv.sessionState(st, err)) {
+            XC_LOGE("%s", err.c_str());
+            return false;
+        }
+        if (st.state == xcloud::SessionState::WaitingForResources) {
+            XC_LOGI("in queue, estimated wait %ds", gssv.waitTimeSeconds());
+        } else {
+            XC_LOGI("session state: %s", st.raw.c_str());
+        }
+        if (st.state == xcloud::SessionState::Failed) {
+            XC_LOGE("session failed: %s %s", st.errorCode.c_str(), st.errorMessage.c_str());
+            return false;
+        }
+        if (st.state == xcloud::SessionState::ReadyToConnect && !connected) {
+            std::string transfer;
+            if (!am.consoleTransferToken(transfer, err) || !gssv.connect(transfer, err)) {
+                XC_LOGE("%s", err.c_str());
+                return false;
+            }
+            connected = true;
+        }
+        if (st.state == xcloud::SessionState::Provisioned) return true;
+        platform::sleepMs(1000);
+    }
+    XC_LOGE("timed out waiting for the session");
+    return false;
+}
+
+int cmdProvision(auth::AuthManager& am, const std::string& titleId) {
+    xcloud::GssvClient gssv;
+    if (!signIn(am, gssv)) return 1;
+    bool ok = provision(am, gssv, titleId);
+    if (ok) std::printf("Session provisioned.\n");
+    gssv.stopSession();
+    return ok ? 0 : 1;
+}
+
+int cmdStream(auth::AuthManager& am, const std::string& titleId, int seconds, const char* outPath,
+              xcloud::Resolution res, const stream::StreamOptions& opts, const std::string& region = {}) {
+    xcloud::GssvClient gssv;
+    gssv.setResolution(res);
+    if (!signIn(am, gssv)) return 1;
+    for (const auto& r : gssv.session().regions) {
+        XC_LOGD("region %s%s", r.name.c_str(), r.isDefault ? " (default)" : "");
+        if (!region.empty() && strcasecmp(r.name.c_str(), region.c_str()) == 0) {
+            gssv.setRegion(r);
+            XC_LOGI("using region %s (%s)", r.name.c_str(), r.baseUri.c_str());
+        }
+    }
+    if (!provision(am, gssv, titleId)) {
+        gssv.stopSession();
+        return 1;
+    }
+
+    FILE* out = outPath ? std::fopen(outPath, "wb") : nullptr;
+    std::atomic<uint64_t> videoFrames{0}, videoBytes{0}, audioPackets{0}, keyFrames{0};
+    std::atomic<bool> closed{false};
+    stream::StreamCallbacks cb;
+    cb.video = [&](const uint8_t* d, size_t n, uint32_t) {
+        ++videoFrames;
+        videoBytes += n;
+        // An IDR slice (NAL type 5) after a 4-byte start code anywhere in the AU.
+        for (size_t i = 0; i + 4 < n; ++i)
+            if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1 && (d[i + 3] & 0x1f) == 5) {
+                ++keyFrames;
+                break;
+            }
+        if (out) std::fwrite(d, 1, n, out);
+    };
+    media::AudioDecoder audioDecoder;
+    if (!audioDecoder.init()) return 1;
+    std::atomic<uint64_t> audioSamples{0};
+    std::vector<float> pcm;
+    cb.audio = [&](const uint8_t* d, size_t n, uint32_t) {
+        ++audioPackets;
+        pcm.clear();
+        if (audioDecoder.decode(d, n, pcm)) audioSamples += pcm.size() / 2;
+    };
+    cb.vibration = [](const stream::Vibration& v) {
+        XC_LOGI("rumble %u/%u for %ums", v.leftMotor, v.rightMotor, v.durationMs);
+    };
+    cb.closed = [&](const std::string&, bool) { closed = true; };
+
+    int rc = 1;
+    {
+        stream::StreamSession session(gssv, cb, opts);
+        std::string err;
+        if (!session.start(err)) {
+            XC_LOGE("stream: %s", err.c_str());
+        } else {
+            std::printf("Streaming %s for %ds...\n", titleId.c_str(), seconds);
+            uint64_t end = platform::nowMs() + static_cast<uint64_t>(seconds) * 1000u;
+            uint64_t nextReport = platform::nowMs() + 1000;
+            stream::GamepadFrame idle;
+            while (platform::nowMs() < end && !closed) {
+                session.sendGamepad(idle);
+                if (platform::nowMs() >= nextReport) {
+                    nextReport += 1000;
+                    session.tick();
+                    const auto& rtp = session.videoStats();
+                    std::printf("video %llu frames (%llu key) %.1f MB, audio %llu packets (%.1f s decoded); "
+                                "rtp %llu pkts, %llu lost, %llu recovered, %llu nacks, %llu dropped, %llu kf req, %u kbps (remb %u)\n",
+                                static_cast<unsigned long long>(videoFrames.load()),
+                                static_cast<unsigned long long>(keyFrames.load()), videoBytes.load() / 1048576.0,
+                                static_cast<unsigned long long>(audioPackets.load()),
+                                audioSamples.load() / double(media::AudioDecoder::kSampleRate),
+                                static_cast<unsigned long long>(rtp.packets.load()),
+                                static_cast<unsigned long long>(rtp.lost.load()),
+                                static_cast<unsigned long long>(rtp.recovered.load()),
+                                static_cast<unsigned long long>(rtp.nacks.load()),
+                                static_cast<unsigned long long>(rtp.framesDropped.load()),
+                                static_cast<unsigned long long>(rtp.keyframeRequests.load()),
+                                rtp.receiveRate.load() / 1000, rtp.estimate.load() / 1000);
+                    std::fflush(stdout);
+                }
+                platform::sleepMs(16);
+            }
+            rc = videoFrames > 0 ? 0 : 1;
+        }
+        session.close();
+    }
+    if (out) std::fclose(out);
+    gssv.stopSession();
+    return rc;
+}
+
+// Splits an Annex-B dump at access unit delimiters / first slices with the
+// FFmpeg parser and times the decoder on it.
+int cmdBenchDecode(const char* path, int threads) {
+    std::string data;
+    if (!platform::readFile(path, data)) {
+        XC_LOGE("cannot read %s", path);
+        return 1;
+    }
+    std::vector<std::pair<size_t, size_t>> aus;
+    if (std::string(path).size() > 4 && std::string(path).substr(std::string(path).size() - 4) == ".aus") {
+        // Length-prefixed access units as received on the console.
+        for (size_t p = 0; p + 4 <= data.size();) {
+            uint32_t n;
+            std::memcpy(&n, data.data() + p, 4);
+            if (p + 4 + n > data.size()) break;
+            aus.emplace_back(p + 4, n);
+            p += 4 + n;
+        }
+    } else {
+        aus = media::splitAccessUnits(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+    }
+
+    media::VideoDecoder dec;
+    if (!dec.init(threads)) return 1;
+    media::Picture pic;
+    int pictures = 0;
+    uint64_t t0 = platform::nowMs();
+    for (const auto& [off, len] : aus)
+        if (dec.decode(reinterpret_cast<const uint8_t*>(data.data()) + off, len, pic)) ++pictures;
+    uint64_t ms = platform::nowMs() - t0;
+    std::printf("%zu access units, %d pictures (%dx%d) in %llu ms: %.1f fps, %.2f ms/picture\n", aus.size(),
+                pictures, pic.width, pic.height, static_cast<unsigned long long>(ms),
+                ms ? pictures * 1000.0 / ms : 0.0, pictures ? double(ms) / pictures : 0.0);
+    return pictures > 0 ? 0 : 1;
+}
+
+// Renders each screen of the console UI with live account data, so the
+// layout can be checked on a PC.
+int cmdUiPreview(auth::AuthManager& am, const std::string& dir) {
+    ui::Fonts fonts;
+    if (!fonts.load("assets/fonts")) return 1;
+    ui::ImageCache images([] {});
+    ui::AppUi app(fonts, images);
+    ui::Canvas canvas(1920, 1080);
+    uint64_t t = 1000;
+    auto save = [&](const char* name, int settleMs = 0) {
+        // Let images arrive and animations settle.
+        for (int waited = 0; waited <= settleMs; waited += 250) {
+            app.render(canvas, t += 250);
+            if (settleMs) platform::sleepMs(250);
+        }
+        app.render(canvas, t += 400);
+        std::string path = dir + "/" + name + ".png";
+        stbi_write_png(path.c_str(), canvas.width(), canvas.height(), 4, canvas.data(), canvas.width() * 4);
+        std::printf("wrote %s\n", path.c_str());
+    };
+
+    app.showSplash(ui::tr(ui::Str::SigningIn));
+    save("splash");
+    app.showSignIn("A1B2C3D4", "https://www.microsoft.com/link");
+    save("signin");
+
+    xcloud::GssvClient gssv;
+    if (!signIn(am, gssv)) return 1;
+    app.setProfile(am.profile().gamertag, am.profile().gamerpicUrl);
+    std::string err;
+    app::Library library;
+    auto onRows = [&] {
+        app.setRows(library.rows());
+        app.setOwned(library.owned(), library.purchasable(), library.ownedKnown());
+        app.setSearchPools(library.gamePassSearchPool(), library.librarySearchPool());
+        auto p = library.progress();
+        app.setLoading(p.active, p.done, p.total);
+    };
+    if (!library.load(gssv, ui::catalogLanguage(), onRows, err)) {
+        XC_LOGE("%s", err.c_str());
+        return 1;
+    }
+    library.loadOwned(gssv, onRows);
+    library.loadCatalogNames(onRows);
+    library.loadPlatforms(am.profile().xblAuthorization, onRows);
+    library.hydrate(onRows);
+    app.showHome();
+    save("home", 4000);
+    {
+        // "Your games" (its games, then those to buy), then searches typed
+        // on the keyboard, in each tab.
+        auto press = [&](auto set, int times) {
+            for (int i = 0; i < times; ++i) {
+                ui::NavInput n;
+                set(n);
+                app.handle(n);
+            }
+        };
+        auto type = [&](const std::string& text) {
+            for (char ch : text) {
+                int idx = static_cast<int>(std::string("abcdefghijklmnopqrstuvwxyz0123456789").find(ch));
+                press([](ui::NavInput& n) { n.up = true; }, 7);
+                press([](ui::NavInput& n) { n.left = true; }, 6);
+                press([](ui::NavInput& n) { n.down = true; }, idx / 6);
+                press([](ui::NavInput& n) { n.right = true; }, idx % 6);
+                press([](ui::NavInput& n) { n.accept = true; }, 1);
+            }
+        };
+        press([](ui::NavInput& n) { n.triangle = true; }, 1);  // Game Pass search
+        type("forza");
+        save("search_gamepass", 3000);
+        press([](ui::NavInput& n) { n.back = true; }, 1);
+        press([](ui::NavInput& n) { n.r1 = true; }, 1);
+        save("library", 3000);
+        int ownedRows = static_cast<int>((library.owned().size() + 5) / 6);
+        press([](ui::NavInput& n) { n.down = true; }, ownedRows);  // into "Available to buy"
+        {
+            // What the app's price thread does: ask for the cards on screen.
+            std::map<std::string, xcloud::Price> got;
+            std::string e;
+            xcloud::fetchPrices(app.pricesWanted(40), gssv.session().market.empty() ? "US" : gssv.session().market,
+                                ui::catalogLanguage(), got, e);
+            std::map<std::string, ui::PriceInfo> texts;
+            for (const auto& [id, p] : got)
+                texts[id] = {p.list < 0.005 ? ui::tr(ui::Str::Free) : xcloud::formatPrice(p.list, p.currency),
+                             p.msrp > p.list + 0.005 ? xcloud::formatPrice(p.msrp, p.currency) : std::string(), p.list,
+                             p.msrp};
+            app.setPrices(texts);
+        }
+        save("library_buy", 3000);
+        press([](ui::NavInput& n) { n.accept = true; }, 1);
+        if (std::string id = app.detailWanted(platform::nowMs()); !id.empty()) {  // as the app's price thread does
+            std::map<std::string, xcloud::Product> full;
+            std::string e;
+            if (xcloud::fetchProducts({id}, gssv.session().market.empty() ? "US" : gssv.session().market,
+                                      ui::catalogLanguage(), full, e, true) &&
+                full.count(id))
+                app.setDetailInfo(id, full[id].description, full[id].publisher, full[id].categories, full[id].heroUrl);
+        }
+        save("details_buy", 2000);
+        press([](ui::NavInput& n) { n.back = true; }, 1);
+        press([](ui::NavInput& n) { n.triangle = true; }, 1);  // "Your games" search
+        type("dead");
+        save("search_library", 3000);
+        press([](ui::NavInput& n) { n.back = true; }, 1);
+        press([](ui::NavInput& n) { n.l1 = true; }, 1);  // back to the Game Pass tab
+    }
+    ui::NavInput right;
+    right.right = true;
+    for (int i = 0; i < 3; ++i) app.handle(right);
+    ui::NavInput down;
+    down.down = true;
+    app.handle(down);
+    save("home_nav", 3000);
+    ui::NavInput accept;
+    accept.accept = true;
+    app.handle(accept);
+    save("details", 2000);
+    {
+        // A game the account can't stream: dimmed card with a lock, no Play.
+        auto rows = library.rows();
+        if (!rows.empty()) {
+            for (auto& row : rows)
+                for (size_t i = 0; i < row.tiles.size(); i += 2) row.tiles[i].playable = false;
+            app.setRows(rows);
+            app.showHome();
+            save("home_locked", 3000);
+            app.handle(accept);
+            save("details_locked", 1000);
+            app.setRows(library.rows());
+        }
+    }
+    ui::GameTile game;
+    game.name = "Balatro";
+    app.showLaunching(game, ui::trf(ui::Str::InQueue, "1 min"));
+    save("launching");
+    app.showError("Could not connect to the stream: the server did not answer in time.");
+    save("error");
+
+    // Settings, then the same screens in Portuguese.
+    std::vector<std::string> regions;
+    for (const auto& r : gssv.session().regions) regions.push_back(r.name);
+    app.setRegions(regions, gssv.region().name);
+    app.showHome();
+    ui::NavInput tri;
+    tri.options = true;
+    app.handle(tri);
+    save("settings");
+    ui::NavInput down2;
+    down2.down = true;
+    app.handle(down2);
+    app.handle(down2);
+    ui::NavInput rightOne;
+    rightOne.right = true;
+    app.handle(rightOne);  // pick the first non-automatic region
+    ui::NavInput up2;
+    up2.up = true;
+    app.handle(up2);
+    app.handle(up2);
+    app.handle(rightOne);  // English -> Portugues (Brasil)
+    save("settings_pt");
+    app.handle(tri);  // back to home
+    if (!library.load(gssv, ui::catalogLanguage(), onRows, err)) XC_LOGE("%s", err.c_str());
+    library.hydrate(onRows);
+    app.showHome();
+    save("home_pt", 3000);
+    // Sign-out hold feedback, 2 s into the 5 s hold.
+    ui::NavInput hold;
+    hold.touchpad = true;
+    hold.nowMs = 100000;
+    app.handle(hold);
+    hold.nowMs = 102000;
+    app.handle(hold);
+    app.render(canvas, 102000);
+    std::string holdPath = dir + "/signout_hold.png";
+    stbi_write_png(holdPath.c_str(), canvas.width(), canvas.height(), 4, canvas.data(), canvas.width() * 4);
+    std::printf("wrote %s\n", holdPath.c_str());
+    ui::setLanguage(ui::Language::English);
+    return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    int argi = 1;
+    if (argi < argc && std::strcmp(argv[argi], "-v") == 0) {
+        log::setLevel(log::Level::Debug);
+        ++argi;
+    }
+    if (argi >= argc) return usage();
+    std::string cmd = argv[argi++];
+    if (cmd == "render-icon" && argi < argc) {
+        int size = argi + 1 < argc ? std::atoi(argv[argi + 1]) : 512;
+        ui::Fonts fonts;
+        if (!fonts.load("assets/fonts")) return 1;
+        ui::Canvas icon(size, size);
+        ui::drawAppIcon(icon, fonts);
+        // icon0.png is RGB: drop the alpha channel.
+        std::vector<uint8_t> rgb(static_cast<size_t>(size) * size * 3);
+        for (size_t i = 0; i < static_cast<size_t>(size) * size; ++i) {
+            uint32_t p = icon.data()[i];
+            rgb[i * 3] = p & 0xFF;
+            rgb[i * 3 + 1] = (p >> 8) & 0xFF;
+            rgb[i * 3 + 2] = (p >> 16) & 0xFF;
+        }
+        return stbi_write_png(argv[argi], size, size, 3, rgb.data(), size * 3) ? 0 : 1;
+    }
+    if ((cmd == "render-pic0" || cmd == "render-pic1") && argi < argc) {
+        // PS5 home-screen backgrounds (PNG; tools/ps5/home-art.sh makes DDS).
+        int w = argi + 1 < argc ? std::atoi(argv[argi + 1]) : 3840;
+        int h = w * 9 / 16;
+        ui::Fonts fonts;
+        if (!fonts.load("assets/fonts")) return 1;
+        ui::Canvas art(w, h);
+        ui::drawHomeArt(art, fonts, cmd == "render-pic1");
+        std::vector<uint8_t> rgb(static_cast<size_t>(w) * h * 3);
+        for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i) {
+            uint32_t p = art.data()[i];
+            rgb[i * 3] = p & 0xFF;
+            rgb[i * 3 + 1] = (p >> 8) & 0xFF;
+            rgb[i * 3 + 2] = (p >> 16) & 0xFF;
+        }
+        return stbi_write_png(argv[argi], w, h, 3, rgb.data(), w * 3) ? 0 : 1;
+    }
+    if (cmd == "bench-decode" && argi < argc)
+        return cmdBenchDecode(argv[argi], argi + 1 < argc ? std::atoi(argv[argi + 1]) : 1);
+
+    platform::init();
+    if (!net::initTls(platform::caBundlePath())) return 1;
+    if (cmd == "tls-stress") {
+        // Diagnostics: many HTTPS requests at once (public URLs, no account),
+        // as the app makes them at start; prints how many failed and why.
+        int threads = argi < argc ? std::atoi(argv[argi]) : 16, rounds = argi + 1 < argc ? std::atoi(argv[argi + 1]) : 4;
+        const char* urls[] = {"https://catalog.gamepass.com/sigls/v2?id=af206485-e87d-4624-9007-cb7f6d0cc42e&market=US&language=en-us",
+                              "https://www.xbox.com/en-US/play", "https://store-images.s-microsoft.com/image/apps.28754.13851675759085158.74991af7-70f4-4aea-ad50-57bb8bc448c3.552869ac-6877-4457-90ec-ee9ce0701c50?w=240&h=240",
+                              "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=9NBLGGH4R315&market=US&languages=en-us"};
+        std::atomic<int> ok{0}, failed{0};
+        std::mutex errorsMutex;
+        std::map<std::string, int> errors;
+        std::vector<std::thread> pool;
+        for (int t = 0; t < threads; ++t)
+            pool.emplace_back([&, t] {
+                for (int r = 0; r < rounds; ++r) {
+                    net::Request req;
+                    req.url = urls[(t + r) % 4];
+                    auto resp = net::perform(req);
+                    if (resp.status > 0) {
+                        ++ok;
+                    } else {
+                        ++failed;
+                        std::lock_guard<std::mutex> lock(errorsMutex);
+                        ++errors[resp.error.substr(resp.error.find(':') == std::string::npos ? 0 : resp.error.find(':') + 2, 60)];
+                    }
+                }
+            });
+        for (auto& th : pool) th.join();
+        std::printf("tls-stress: %d threads x %d: %d answered, %d failed\n", threads, rounds, ok.load(), failed.load());
+        for (const auto& [e, n] : errors) std::printf("  %3d x %s\n", n, e.c_str());
+        return failed ? 1 : 0;
+    }
+    if (cmd == "self-update" && argi + 1 < argc) {
+        // The updater against a release feed, into a folder:
+        // self-update <feed url> <dir> [extra CA .pem] [current version].
+        if (argi + 2 < argc && !net::addTrustedCa(argv[argi + 2])) return 1;
+        std::string current = argi + 3 < argc ? argv[argi + 3] : XC_APP_VERSION, err;
+        app::Release release;
+        if (!app::findLatestRelease(release, err, argv[argi])) {
+            std::fprintf(stderr, "release: %s\n", err.c_str());
+            return 1;
+        }
+        std::printf("release %s: %s (%ld bytes), %s\n", release.tag.c_str(), release.zipUrl.c_str(), release.zipSize,
+                    release.sigUrl.c_str());
+        bool ok = app::installRelease(release, argv[argi + 1], current, [](app::UpdateStep step, double f) {
+            static int last = -2;
+            int pct = f < 0 ? -1 : static_cast<int>(f * 10) * 10;
+            if (pct != last) std::printf("  step %d: %d%%\n", static_cast<int>(step), pct);
+            last = pct;
+        }, err);
+        std::printf("%s\n", ok ? "installed" : ("failed: " + err).c_str());
+        return ok ? 0 : 1;
+    }
+    auth::AuthManager am(platform::dataDir() + "/account.json");
+
+    int rc;
+    if (cmd == "login") {
+        xcloud::GssvClient gssv;
+        rc = signIn(am, gssv) ? 0 : 1;
+    } else if (cmd == "titlehub" && argi < argc) {
+        // Debugging: titlehub's view of Xbox title ids (devices etc.).
+        xcloud::GssvClient gssv;
+        if (!signIn(am, gssv)) return 1;
+        json::Value ids = json::Value::array();
+        for (; argi < argc; ++argi) ids.push(std::string(argv[argi]));
+        json::Value body = json::Value::object();
+        body.set("pfns", nullptr);
+        body.set("titleIds", ids);
+        net::Request req;
+        req.method = "POST";
+        req.url = "https://titlehub.xboxlive.com/titles/batch/decoration/detail";
+        req.headers = {{"Authorization", am.profile().xblAuthorization},
+                       {"x-xbl-contract-version", "2"},
+                       {"Content-Type", "application/json"},
+                       {"Accept-Language", "en-US"}};
+        req.body = body.dump();
+        auto r = net::perform(req);
+        std::printf("HTTP %d\n%s\n", r.status, r.body.c_str());
+        return r.ok() ? 0 : 1;
+    } else if (cmd == "titles") {
+        rc = cmdTitles(am, argi < argc && std::strcmp(argv[argi], "--recent") == 0);
+    } else if (cmd == "provision" && argi < argc) {
+        rc = cmdProvision(am, argv[argi]);
+    } else if (cmd == "stream" && argi < argc) {
+        // stream <id> [seconds] [out.h264] [--720p] [--region=NAME]
+        std::vector<const char*> pos;
+        xcloud::Resolution res = xcloud::Resolution::P1080;
+        stream::StreamOptions opts;
+        if (const char* loss = std::getenv("XC_SIM_LOSS")) opts.simulatedVideoLoss = std::atoi(loss);
+        std::string region;
+        for (; argi < argc; ++argi) {
+            std::string a = argv[argi];
+            if (a.rfind("--region=", 0) == 0) region = a.substr(9);
+            else if (a == "--720p") res = xcloud::Resolution::P720;
+            else if (a == "--qhd-display") res = xcloud::Resolution::P1440;
+            else if (a.rfind("--tier=", 0) == 0) opts.resolutionAlias = a.substr(7);
+            else pos.push_back(argv[argi]);
+        }
+        int seconds = pos.size() > 1 ? std::atoi(pos[1]) : 30;
+        rc = cmdStream(am, pos[0], seconds > 0 ? seconds : 30, pos.size() > 2 ? pos[2] : nullptr, res, opts, region);
+    } else if (cmd == "ui-settings" && argi < argc) {
+        // Offline: Settings with the region list open, then the language list.
+        ui::Fonts fonts;
+        if (!fonts.load("assets/fonts")) return 1;
+        ui::ImageCache images([] {});
+        ui::AppUi app(fonts, images);
+        ui::Canvas canvas(1920, 1080);
+        app.setRegions({"AUSTRALIAEAST", "BRAZILSOUTH", "CHILECENTRAL", "EASTUS", "EASTUS2", "JAPANEAST", "MEXICOCENTRAL",
+                        "NORTHCENTRALUS", "SOUTHCENTRALUS", "UKSOUTH", "WESTEUROPE", "WESTUS"},
+                       "BRAZILSOUTH");
+        app.setRegionLatency({{"BRAZILSOUTH", 9}, {"EASTUS", 128}});
+        app.showHome();
+        auto press = [&](auto set) {
+            ui::NavInput n;
+            set(n);
+            app.handle(n);
+        };
+        auto save = [&](const std::string& name) {
+            app.render(canvas, 1000);
+            std::string path = std::string(argv[argi]) + "/" + name + ".png";
+            stbi_write_png(path.c_str(), canvas.width(), canvas.height(), 4, canvas.data(), canvas.width() * 4);
+            std::printf("wrote %s\n", path.c_str());
+        };
+        press([](ui::NavInput& n) { n.options = true; });
+        press([](ui::NavInput& n) { n.down = true; });
+        press([](ui::NavInput& n) { n.down = true; });
+        save("settings_rows");
+        press([](ui::NavInput& n) { n.accept = true; });
+        for (int i = 0; i < 4; ++i) press([](ui::NavInput& n) { n.down = true; });
+        save("settings_regions");
+        press([](ui::NavInput& n) { n.back = true; });
+        press([](ui::NavInput& n) { n.up = true; });
+        press([](ui::NavInput& n) { n.up = true; });
+        press([](ui::NavInput& n) { n.accept = true; });
+        press([](ui::NavInput& n) { n.down = true; });
+        save("settings_language");
+        press([](ui::NavInput& n) { n.back = true; });
+        press([](ui::NavInput& n) { n.down = true; });
+        press([](ui::NavInput& n) { n.accept = true; });
+        save("settings_resolution");
+        return 0;
+    } else if (cmd == "ui-menu" && argi < argc) {
+        // Offline: the in-game menu and the statistics line over a made-up
+        // game picture, blended as display::setOverlay() does.
+        ui::Fonts fonts;
+        if (!fonts.load("assets/fonts")) return 1;
+        ui::StreamMenu menu(fonts);
+        {
+            ui::PadSlots pads{};
+            pads[0] = {true, "RafaelNGP"};
+            pads[1] = {true, "A very long PS5 user name"};
+            menu.setPads(pads);
+        }
+        ui::StreamInfo info;
+        info.region = "Brazil South";
+        info.rttMs = 23;
+        info.fps = 60;
+        info.mbps = 12.4;
+        info.lossPct = 0.2;
+        info.decodeMs = 4.1;
+        info.onScreenMs = 23.2;
+        info.width = 1920;
+        info.height = 1080;
+        auto save = [&](const std::string& name, const ui::Canvas& over, int ox, int oy, int alpha) {
+            ui::Canvas frame(1920, 1080);
+            frame.gradientH({0, 0, 1920, 1080}, ui::rgba(40, 90, 160), ui::rgba(200, 120, 40));
+            uint32_t* px = frame.data();
+            for (int y = 0; y < over.height(); ++y)
+                for (int x = 0; x < over.width(); ++x) {
+                    uint32_t& d = px[(oy + y) * 1920 + ox + x];
+                    uint32_t o = over.data()[y * over.width() + x];
+                    uint32_t out = 0xFF000000u;
+                    for (int sh = 0; sh < 24; sh += 8)
+                        out |= ((((o >> sh) & 0xFF) * alpha + ((d >> sh) & 0xFF) * (255 - alpha)) / 255) << sh;
+                    d = out;
+                }
+            std::string path = std::string(argv[argi]) + "/" + name + ".png";
+            stbi_write_png(path.c_str(), 1920, 1080, 4, frame.data(), 1920 * 4);
+            std::printf("wrote %s\n", path.c_str());
+        };
+        menu.open(0, true, 2);
+        save("menu", menu.renderMenu(info), ui::StreamMenu::kMenuX, ui::StreamMenu::kMenuY, 235);
+        ui::NavInput n;
+        n.down = true;
+        for (int i = 0; i < 5; ++i) menu.handle(n);
+        n = {};
+        n.right = true;
+        menu.handle(n);  // 1080p -> 1440p
+        n = {};
+        n.accept = true;
+        menu.handle(n);
+        save("menu_resolution", menu.renderMenu(info), ui::StreamMenu::kMenuX, ui::StreamMenu::kMenuY, 235);
+        save("stats", menu.renderStats(info), ui::StreamMenu::kStatsX, ui::StreamMenu::kStatsY, 200);
+        ui::setLanguage(ui::Language::PortugueseBR);
+        save("menu_pt", menu.renderMenu(info), ui::StreamMenu::kMenuX, ui::StreamMenu::kMenuY, 235);
+        return 0;
+    } else if (cmd == "ui-badges" && argi < argc) {
+        // Offline: "Your games" with every badge, hiding, sorting and the
+        // search filters, with made-up games. PNGs into the given directory.
+        ui::Fonts fonts;
+        if (!fonts.load("assets/fonts")) return 1;
+        ui::ImageCache images([] {});
+        ui::AppUi app(fonts, images);
+        {
+            ui::PadSlots pads{};
+            pads[0] = {true, "RafaelNGP"};
+            pads[1] = {true, "Player 2"};
+            app.setPads(pads);
+        }
+        ui::Canvas canvas(1920, 1080);
+        std::vector<ui::GameTile> owned, buy;
+        const char* platforms[] = {"XS", "ONE", "360"};
+        const char* names[] = {"Zeta", "Alpha", "Mango", "Bravo", "Kilo", "Delta"};
+        for (int i = 0; i < 6; ++i) {
+            ui::GameTile t;
+            t.productId = "OWNED" + std::to_string(i);
+            t.titleId = t.productId;
+            t.name = std::string(names[i]) + " owned";
+            t.platform = platforms[i % 3];
+            owned.push_back(t);
+            t.productId = "BUY" + std::to_string(i);
+            t.titleId = t.productId;
+            t.name = std::string(names[i]) + " to buy";
+            t.playable = false;
+            t.purchasable = true;
+            t.freeInStore = i == 2;
+            buy.push_back(t);
+        }
+        std::vector<ui::GameTile> pool = owned;
+        pool.insert(pool.end(), buy.begin(), buy.end());
+        app.setOwned(owned, buy, true);
+        app.setSearchPools({}, pool);
+        app.setPrices({{"BUY0", {"R$ 56,98", "R$ 284,90", 56.98, 284.9}},
+                       {"BUY1", {"R$ 199,99", "", 199.99, 199.99}},
+                       {"BUY2", {"GR\xC3\x81TIS", "", 0, 0}},
+                       {"BUY3", {"R$ 1.299,90", "", 1299.9, 1299.9}},
+                       {"BUY4", {"R$ 20,00", "R$ 40,00", 20, 40}},
+                       {"BUY5", {"GR\xC3\x81TIS", "R$ 99,90", 0, 99.9}}});  // a giveaway
+        app.showHome();
+        auto press = [&](auto set, int times = 1) {
+            for (int i = 0; i < times; ++i) {
+                ui::NavInput n;
+                set(n);
+                app.handle(n);
+            }
+        };
+        uint64_t clock = 1000;
+        auto save = [&](const std::string& name) {
+            app.render(canvas, clock += 1000);
+            app.render(canvas, clock += 1000);
+            std::string path = std::string(argv[argi]) + "/" + name + ".png";
+            stbi_write_png(path.c_str(), canvas.width(), canvas.height(), 4, canvas.data(), canvas.width() * 4);
+            std::printf("wrote %s\n", path.c_str());
+        };
+        press([](ui::NavInput& n) { n.r1 = true; });
+        save("badges");
+        press([](ui::NavInput& n) { n.right = true; }, 2);  // the third game
+        press([](ui::NavInput& n) { n.square = true; });    // hide it: the cursor stays there
+        save("library_hid_one");
+        press([](ui::NavInput& n) { n.r3 = true; }, 2);     // Recent -> A-Z -> By console, in place
+        save("library_console");
+        press([](ui::NavInput& n) { n.down = true; }, 3);  // down to "Hidden"
+        save("library_hidden");
+        press([](ui::NavInput& n) { n.up = true; }, 6);  // back to the top of Your games
+        press([](ui::NavInput& n) { n.r2 = true; }, 2);  // jump: to buy, then Hidden
+        save("library_r2");
+        {
+            // Game Pass: hide the second game of the first row; it goes to a
+            // "Hidden" row at the end of that tab.
+            ui::GameRow row;
+            row.title = "Recently added";
+            for (int i = 0; i < 4; ++i) {
+                ui::GameTile t;
+                t.productId = "GP" + std::to_string(i);
+                t.titleId = t.productId;
+                t.name = "Game Pass game " + std::to_string(i);
+                t.platform = platforms[i % 3];
+                row.tiles.push_back(t);
+            }
+            app.setRows({row});
+            press([](ui::NavInput& n) { n.l1 = true; });
+            press([](ui::NavInput& n) { n.right = true; });
+            press([](ui::NavInput& n) { n.square = true; });
+            press([](ui::NavInput& n) { n.down = true; });
+            save("gamepass_hidden");
+            press([](ui::NavInput& n) { n.r1 = true; });
+        }
+        press([](ui::NavInput& n) { n.triangle = true; });  // search "Your games"
+        press([](ui::NavInput& n) { n.down = true; }, 7);   // the filter row
+        press([](ui::NavInput& n) { n.right = true; });     // "Lowest price"
+        press([](ui::NavInput& n) { n.accept = true; });
+        save("search_cheapest");
+        return 0;
+    } else if (cmd == "ui-preview" && argi < argc) {
+        rc = cmdUiPreview(am, argv[argi]);
+    } else if (cmd == "logout") {
+        am.signOut();
+        std::printf("Signed out.\n");
+        rc = 0;
+    } else {
+        rc = usage();
+    }
+    net::shutdownTls();
+    platform::shutdown();
+    return rc;
+}
