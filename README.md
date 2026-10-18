@@ -36,8 +36,6 @@ These settings are requests and client-side presentation choices. They do not gu
 
 **Current beta:** app **0.1.0**, build **1**, title ID `PSBX00001`, installer version `00.01`. It installs separately from the older `XCHM00001` app. Existing account/profile data is not automatically migrated or cleared by this title ID change.
 
-The package was compiled and packaged on [GitHub Actions](https://github.com/Lucky73747/PSBOX-PS4/actions/runs/39092806118). This confirms the build, not successful operation on a PS4. Console validation of this exact package remains pending. See the [initial changelog and known issues](docs/CHANGELOG.md), including keyboard text delivery, session closing, audio synchronization and video recovery.
-
 Obtain packages only from sources you trust. Consider the risks of using experimental, unofficial software with your account and console.
 
 ## How it works
@@ -177,8 +175,6 @@ Essas configurações são solicitações e escolhas de apresentação feitas pe
 3. Abra **PSBOX**, siga as instruções de login e escolha um jogo disponível no catálogo.
 
 **Beta atual:** app **0.1.0**, build **1**, identificador `PSBX00001`, instalador `00.01`. Instala separadamente do antigo `XCHM00001`. A mudança de identificador não migra nem apaga automaticamente os dados de conta e perfil existentes.
-
-O pacote foi compilado e empacotado no [GitHub Actions](https://github.com/Lucky73747/PSBOX-PS4/actions/runs/39092806118). Isso confirma a compilação, não o funcionamento no PS4. A validação desse pacote exato no console continua pendente. Consulte o [changelog inicial e os problemas conhecidos](docs/CHANGELOG.md), incluindo entrega do texto do teclado, encerramento da sessão, sincronização de áudio e recuperação de vídeo.
 
 Baixe pacotes somente de fontes confiáveis. Considere os riscos de usar software experimental e não oficial com sua conta e seu console.
 
