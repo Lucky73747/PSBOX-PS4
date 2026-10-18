@@ -15,7 +15,7 @@
 
 ### Known issues and validation status
 
-- The new identity/build has not yet been compiled or tested on PS4. No matching beta build 1 PKG is attached.
+- Build 1 was compiled and packaged on GitHub-hosted Ubuntu in [run 39092806118](https://github.com/Lucky73747/PSBOX-PS4/actions/runs/39092806118). The artifact records the exact compiled commit. PS4 runtime testing remains pending.
 - Earlier keyboard fixes address UTF-16 input, controller suppression while the IME is open, and dialog termination. Actual text delivery to games still requires console validation; local data-channel acceptance does not confirm game receipt.
 - The earlier session-close fix moves teardown to a worker and uses the dock exit button. Its effect on reported freezes still requires console validation.
 - Audio synchronization and recovery remain limited. Video stutter, freeze recovery and UI responsiveness require testing under real network and console conditions.
@@ -32,6 +32,6 @@ Include version/build, PS4 model, reproduction steps and redacted app log/Klog f
 
 ## Português
 
-A Beta 0.1 começa na **build 1**, com nome PSBOX e identificador `PSBX00001`. Instala separadamente do app antigo. O PKG esperado será `PSBOX-0.1.0-beta-b1.pkg`, mas ainda não foi compilado nem validado no console.
+A Beta 0.1 começa na **build 1**, com nome PSBOX e identificador `PSBX00001`. Instala separadamente do app antigo. O PKG esperado será `PSBOX-0.1.0-beta-b1.pkg`, compilado no GitHub Actions e acompanhado de SHA-256. Ainda não foi validado no console.
 
 Pontos para testar: teclado e entrega do texto ao jogo, saída da sessão sem congelamento, sincronização de áudio, recuperação de vídeo e fluidez da UI. Esses itens são pendências de validação, não correções comprovadas nesta build. A resolução e o bitrate efetivamente recebidos dependem também do serviço. Consulte as pendências de licenciamento antes de distribuir binários.

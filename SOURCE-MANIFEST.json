@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "created_utc": "2026-10-18T03:12:25.539420+00:00",
+  "created_utc": "2026-10-18T03:16:18.754275+00:00",
   "application": "PSBOX-PS4",
   "scope": "current selected source, including uncommitted changes",
   "history_included": false,
@@ -63,8 +63,8 @@
     },
     {
       "path": "README.md",
-      "size": 7234,
-      "sha256": "af1d2124c60e42a54349bce45231bd26997bb0aff39c79592dc502c3d5dae1b7"
+      "size": 7450,
+      "sha256": "1f7ed53ddafc0dadccc42b5b4239c32ddd77c63548c4d659a7543ba526681b40"
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
@@ -40853,8 +40853,8 @@
     },
     {
       "path": "docs/CHANGELOG.md",
-      "size": 2793,
-      "sha256": "1158d35b9fe63c545a2cb0566a2765057eca766bebfdd3ae79137f1050835d42"
+      "size": 2951,
+      "sha256": "6217660d1761819f59d6633ef4b2f2c29f7c2c221de74646e1c5a0fef74138d2"
     },
     {
       "path": "docs/LICENSE-STATUS.md",

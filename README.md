@@ -4,11 +4,11 @@ PSBOX is an independent homebrew client for PlayStation 4. It is intended to let
 
 PSBOX is not an Xbox or PlayStation product and is not affiliated with, endorsed by, or sponsored by Microsoft, Xbox, Sony, or PlayStation. The current implementation connects to Microsoft's game-streaming service; this describes technical compatibility, not ownership or endorsement. All trademarks belong to their respective owners.
 
-This source identifies app version **0.1.0**, build **1**. The new PS4 title ID is `PSBX00001`, with installer version `00.01`; it installs separately from the old `XCHM00001` app. Package name: `PSBOX-0.1.0-beta-b1.pkg`. The current source snapshot has not yet been rebuilt as the 0.1.0 package or validated in a console session. No PKG is included here.
+This source identifies app version **0.1.0**, build **1**. The new PS4 title ID is `PSBX00001`, with installer version `00.01`; it installs separately from the old `XCHM00001` app. Package name: `PSBOX-0.1.0-beta-b1.pkg`. Beta build 1 was compiled and packaged by [GitHub Actions](https://github.com/Lucky73747/PSBOX-PS4/actions/runs/39092806118). The PKG is available from the [beta release](https://github.com/Lucky73747/PSBOX-PS4/releases/tag/v0.1.0-beta.1). Console runtime validation is pending.
 
 ## Beta 0.1
 
-The beta series starts at **build 1**. See the [initial changelog and known issues](docs/CHANGELOG.md). The older internal build 107 PKG is not this beta build. No matching build 1 package has been compiled or attached yet.
+The beta series starts at **build 1**. See the [initial changelog and known issues](docs/CHANGELOG.md). The older internal build 107 PKG is not this beta build. The release package is `PSBOX-0.1.0-beta-b1.pkg`; verify it against the attached `SHA256SUMS`.
 
 ## Features and limitations
 
@@ -63,7 +63,7 @@ O PSBOX não é um produto da Xbox, Microsoft, PlayStation ou Sony e não é afi
 
 Consulte o [changelog inicial e os problemas conhecidos](docs/CHANGELOG.md). A antiga build interna 107 não corresponde à nova build 1.
 
-Este código identifica a versão **0.1.0**, build **1**. O novo identificador PS4 é `PSBX00001`, com instalador `00.01`; ele instala separadamente do antigo `XCHM00001`. Nome do pacote: `PSBOX-0.1.0-beta-b1.pkg`. Esta cópia ainda não foi recompilada como pacote 0.1.0 nem validada em uma sessão no console. Nenhum PKG está incluído.
+Este código identifica a versão **0.1.0**, build **1**. O novo identificador PS4 é `PSBX00001`, com instalador `00.01`; ele instala separadamente do antigo `XCHM00001`. Nome do pacote: `PSBOX-0.1.0-beta-b1.pkg`. A build 1 foi compilada e empacotada no GitHub Actions. O PKG está disponível na release beta, com SHA-256. A validação de execução no PS4 continua pendente.
 
 O app oferece login e catálogo, decodificação H.264 por hardware no PS4, renderização Vulkan, escalonamento bilinear e FidelityFX FSR1, saída de áudio Opus, navegação por controle e estatísticas configuráveis. Jogos disponíveis, resolução, bitrate, latência e estabilidade dependem da conta, serviço, título, rede e console. Uma compilação concluída confirma somente compilação e empacotamento, não o funcionamento no PS4.
 
