@@ -23,6 +23,7 @@ constexpr Color withAlpha(Color c, uint8_t a) { return (c & 0x00FFFFFFu) | (stat
 struct Image {
     int w = 0, h = 0;
     std::vector<uint32_t> px;  // straight (not premultiplied) alpha
+    bool opaque = false;       // Allows the software canvas to copy opaque artwork without blending.
     size_t bytes() const { return px.size() * 4; }
 };
 
@@ -30,8 +31,9 @@ struct Rect {
     int x = 0, y = 0, w = 0, h = 0;
 };
 
-// Streaming HUD draw list: masks are cached in an atlas; blending and rounded
-// panels are executed by Vulkan. Other screens keep the software canvas.
+// GPU UI commands cache glyph masks in an atlas; Vulkan blends glyphs on all
+// PS4 screens and also draws HUD geometry during streaming. Remaining artwork
+// and ordered library composition stay on the software canvas.
 struct GpuUiCommand {
     Rect rect, clip, atlas;
     Color color;
@@ -47,8 +49,12 @@ public:
     const uint32_t* data() const { return px_.data(); }
     uint32_t* data() { return px_.data(); }
 
-    void enableGpuUi(bool enabled) { gpuUi_ = enabled; }
-    bool gpuUiEnabled() const { return gpuUi_; }
+    void enableGpuUi(bool enabled);
+    void enableGpuText(bool enabled);
+    void beginGpuFrame();
+    bool gpuUiEnabled() const { return gpuUi_ || gpuText_; }
+    bool gpuUiShapesEnabled() const { return gpuUi_; }
+    bool gpuTextEnabled() const { return gpuText_; }
     const std::vector<GpuUiCommand>& gpuCommands() const { return gpuCommands_; }
     const uint32_t* gpuAtlas() const { return gpuAtlas_.data(); }
     uint64_t gpuAtlasGeneration() const { return gpuAtlasGeneration_; }
@@ -73,14 +79,17 @@ public:
     void drawImage(const Image& img, int x, int y, uint8_t opacity = 255, int radius = 0);
     // Blends a single colour through an 8-bit coverage mask (text, QR).
     void drawMask(const uint8_t* mask, int mw, int mh, int stride, int x, int y, Color c);
+    // Font glyph path; may be GPU-composited while other masks remain ordered in the CPU canvas.
+    void drawGlyphMask(const uint8_t* mask, int mw, int mh, int stride, int x, int y, Color c);
 
 private:
     void drawPrimitiveMask(Rect bounds, Color color, const std::function<void(Canvas&)>& draw);
+    void drawMaskImpl(const uint8_t* mask, int mw, int mh, int stride, int x, int y, Color c, bool glyph);
     void blend(uint32_t& dst, Color src, uint32_t alpha /*0..255*/) const;
     // Coverage (0..255) of a rounded rectangle at pixel (px, py).
     static uint32_t cornerCoverage(Rect r, int radius, int px, int py);
 
-    bool gpuUi_ = false, gpuAtlasOverflow_ = false;
+    bool gpuUi_ = false, gpuText_ = false, gpuAtlasOverflow_ = false;
     std::vector<GpuUiCommand> gpuCommands_;
     std::vector<uint32_t> gpuAtlas_;
     std::unordered_map<uint64_t, Rect> gpuGlyphs_;

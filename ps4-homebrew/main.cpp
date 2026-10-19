@@ -38,6 +38,7 @@
 #include <cstdarg>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -74,9 +75,11 @@ struct StreamProfile {
     bool automaticVideoReset = false;
     uint32_t upscaler = 1; // 0 bilinear, 1 FSR1, 2 native 1:1 output.
     uint32_t frameWait = 1;
-    uint32_t rcasSharpness = 4; // Maximum RCAS sharpness.
+    uint32_t rcasSharpness = 0; // Maximum RCAS sharpness.
+    uint32_t volume = 100; // Local decoded game-audio output level; persists across sessions.
+    uint32_t lastAudibleVolume = 100; // Restored when unmuting; remains nonzero while volume is muted.
     bool nativeRcas = false; // Experimental: apply RCAS at native 1080p.
-    uint32_t fsrScaleFactor = 2; // Experimental 2x EASU intermediate, then downsample.
+    uint32_t fsrTargetHeight = 1080; // EASU target height: 1080 default, 1440/2160 experimental.
     uint8_t statsMode = 2; // 0 off, 1 compact, 2 advanced.
     bool newStatsUiEnabled = true; // Current renderer; diagnostic legacy remains an internal fallback.
     xc::ps4::StreamStatsUiConfig statsUiConfig{};
@@ -131,9 +134,16 @@ StreamProfile loadStreamProfile() {
     profile.frameRate = (*parsed)["frame_rate"].asInt() == 30 ? 30 : 60;
     profile.upscaler = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["gpu_upscaler"].asInt(1), 0, 2));
     profile.frameWait = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["frame_wait"].asInt(1), 0, 1));
-    profile.rcasSharpness = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["fsr_rcas_sharpness"].asInt(2), 0, 4));
+    profile.rcasSharpness = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["fsr_rcas_sharpness"].asInt(0), 0, 4));
+    profile.volume = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["volume"].asInt(100), 0, 100));
+    const int64_t storedLastAudibleVolume = (*parsed)["last_audible_volume"].asInt(-1);
+    profile.lastAudibleVolume = storedLastAudibleVolume >= 1
+        ? static_cast<uint32_t>(std::clamp<int64_t>(storedLastAudibleVolume, 1, 100))
+        : (profile.volume > 0 ? profile.volume : 100);
     profile.nativeRcas = (*parsed)["fsr_native_rcas_experimental"].asBool(false);
-    profile.fsrScaleFactor = (*parsed)["fsr_scale_factor"].asInt(1) == 2 ? 2 : 1;
+    // Legacy multipliers were conditional on the source; start at the safe 1080p target.
+    const auto targetHeight = (*parsed)["fsr_easu_target_height"].asInt(1080);
+    profile.fsrTargetHeight = targetHeight == 1440 || targetHeight == 2160 ? static_cast<uint32_t>(targetHeight) : 1080;
     profile.automaticVideoReset = (*parsed)["automatic_video_reset"].asBool(false);
     const int64_t storedStatsMode = (*parsed)["stats_mode"].asInt(-1);
     profile.statsMode = storedStatsMode >= 0 && storedStatsMode <= 2
@@ -159,9 +169,10 @@ StreamProfile loadStreamProfile() {
     profile.lastDecodeAvgUs = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["decode_avg_us"].asInt(), 0, 1000000));
     profile.lastConvertAvgUs = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["convert_avg_us"].asInt(), 0, 1000000));
     profile.lastSkipPermille = static_cast<uint32_t>(std::clamp<int64_t>((*parsed)["skip_permille"].asInt(), 0, 1000));
-    logLine("stream profile cache hit tier=%s remb_cap=%u fps=%u upscaler=%u rcas=%u native_rcas_experimental=%u scale=%ux queue_max=%u decode_ms=%.2f convert_ms=%.2f skip_pct=%.1f",
+    logLine("stream profile cache hit tier=%s remb_cap=%u fps=%u upscaler=%u rcas_level=%u rcas_sharpness_pct=%u volume=%u native_rcas_experimental=%u easu_target_height=%u queue_max=%u decode_ms=%.2f convert_ms=%.2f skip_pct=%.1f",
             profile.tier.c_str(), profile.maxBitrate, profile.frameRate, profile.upscaler,
-            profile.rcasSharpness, profile.nativeRcas ? 1u : 0u, profile.fsrScaleFactor, profile.lastQueueMax,
+            profile.rcasSharpness, (4u - profile.rcasSharpness) * 25u, profile.volume,
+            profile.nativeRcas ? 1u : 0u, profile.fsrTargetHeight, profile.lastQueueMax,
             profile.lastDecodeAvgUs / 1000.0, profile.lastConvertAvgUs / 1000.0,
             profile.lastSkipPermille / 10.0);
     return profile;
@@ -182,8 +193,10 @@ bool saveStreamProfile(const StreamProfile& profile) {
     value.set("gpu_upscaler", static_cast<int64_t>(profile.upscaler));
     value.set("frame_wait", static_cast<int64_t>(profile.frameWait));
     value.set("fsr_rcas_sharpness", static_cast<int64_t>(profile.rcasSharpness));
+    value.set("volume", static_cast<int64_t>(profile.volume));
+    value.set("last_audible_volume", static_cast<int64_t>(profile.lastAudibleVolume));
     value.set("fsr_native_rcas_experimental", profile.nativeRcas);
-    value.set("fsr_scale_factor", static_cast<int64_t>(profile.fsrScaleFactor));
+    value.set("fsr_easu_target_height", static_cast<int64_t>(profile.fsrTargetHeight));
     value.set("max_bitrate", static_cast<int64_t>(profile.maxBitrate));
     value.set("bitrate_custom", profile.bitrateCustom);
     value.set("last_custom_bitrate", static_cast<int64_t>(profile.lastCustomBitrate));
@@ -195,9 +208,10 @@ bool saveStreamProfile(const StreamProfile& profile) {
         logLine("stream profile cache write failed path=%s", kStreamProfilePath);
         return false;
     }
-    logLine("stream profile cache saved tier=%s remb_cap=%u fps=%u upscaler=%u rcas=%u native_rcas_experimental=%u scale=%ux queue_max=%u skip_pct=%.1f",
+    logLine("stream profile cache saved tier=%s remb_cap=%u fps=%u upscaler=%u rcas_level=%u rcas_sharpness_pct=%u volume=%u native_rcas_experimental=%u easu_target_height=%u queue_max=%u skip_pct=%.1f",
             profile.tier.c_str(), profile.maxBitrate, profile.frameRate, profile.upscaler,
-            profile.rcasSharpness, profile.nativeRcas ? 1u : 0u, profile.fsrScaleFactor, profile.lastQueueMax,
+            profile.rcasSharpness, (4u - profile.rcasSharpness) * 25u, profile.volume,
+            profile.nativeRcas ? 1u : 0u, profile.fsrTargetHeight, profile.lastQueueMax,
             profile.lastSkipPermille / 10.0);
     return true;
 }
@@ -237,7 +251,7 @@ bool sameUiTiles(const std::vector<xc::ui::GameTile>& a, const std::vector<xc::u
         const auto& y = b[i];
         if (x.productId != y.productId || x.titleId != y.titleId || x.name != y.name ||
             x.tileUrl != y.tileUrl || x.heroUrl != y.heroUrl || x.playable != y.playable ||
-            x.purchasable != y.purchasable || x.freeInStore != y.freeInStore) return false;
+            x.purchasable != y.purchasable || x.freeInStore != y.freeInStore || x.accountOwned != y.accountOwned) return false;
     }
     return true;
 }
@@ -541,9 +555,9 @@ struct LoginState {
     uint32_t streamFrameRate = 60, streamDraftFrameRate = 60;
     bool streamAutoReset = false, streamDraftAutoReset = false;
     uint32_t streamUpscaler = 1, streamDraftUpscaler = 1;
-    uint32_t streamRcasSharpness = 4, streamDraftRcasSharpness = 4;
+    uint32_t streamRcasSharpness = 0, streamDraftRcasSharpness = 0;
     bool streamNativeRcas = false, streamDraftNativeRcas = false;
-    uint32_t streamFsrScaleFactor = 2, streamDraftFsrScaleFactor = 2;
+    uint32_t streamFsrTargetHeight = 1080, streamDraftFsrTargetHeight = 1080;
     uint32_t streamFrameWait = 0, streamDraftFrameWait = 0;
     bool streamNewStatsUi = false, streamDraftNewStatsUi = false;
     bool streamStatsSettingsOpen = false;
@@ -576,6 +590,7 @@ struct LoginSnapshot {
     uint64_t libraryRevision;
     uint64_t uiLibraryRevision;
     bool streamTransportLost;
+    bool gpuVideoActive;
     std::string streamTier;
     uint32_t streamBitrateCap;
     uint32_t streamRembEstimate;
@@ -602,9 +617,9 @@ struct LoginSnapshot {
     uint32_t streamFrameRate = 60, streamDraftFrameRate = 60;
     bool streamAutoReset = false, streamDraftAutoReset = false;
     uint32_t streamUpscaler = 1, streamDraftUpscaler = 1;
-    uint32_t streamRcasSharpness = 4, streamDraftRcasSharpness = 4;
+    uint32_t streamRcasSharpness = 0, streamDraftRcasSharpness = 0;
     bool streamNativeRcas = false, streamDraftNativeRcas = false;
-    uint32_t streamFsrScaleFactor = 2, streamDraftFsrScaleFactor = 2;
+    uint32_t streamFsrTargetHeight = 1080, streamDraftFsrTargetHeight = 1080;
     uint32_t streamFrameWait = 0, streamDraftFrameWait = 0;
     bool streamNewStatsUi = false, streamDraftNewStatsUi = false;
     bool streamStatsSettingsOpen = false;
@@ -620,7 +635,7 @@ LoginSnapshot snapshot(LoginState& state) {
             state.catalogTitleCount,
             state.sessionMessage, state.selectedTitle,
             state.expiresInSec, state.generation, state.libraryLoading, state.libraryLoaded,
-            state.libraryRevision, state.uiLibraryRevision, state.streamTransportLost, state.streamTier,
+            state.libraryRevision, state.uiLibraryRevision, state.streamTransportLost, state.gpuVideoActive, state.streamTier,
             state.streamBitrateCap, state.streamRembEstimate, state.streamReceiveRate,
             state.streamRttMs, state.streamWidth, state.streamHeight,
             state.streamNewVideoFps, state.streamPublishedFps, state.streamQueueDepth,
@@ -634,7 +649,7 @@ LoginSnapshot snapshot(LoginState& state) {
             state.streamAutoReset, state.streamDraftAutoReset, state.streamUpscaler, state.streamDraftUpscaler,
             state.streamRcasSharpness, state.streamDraftRcasSharpness,
             state.streamNativeRcas, state.streamDraftNativeRcas,
-            state.streamFsrScaleFactor, state.streamDraftFsrScaleFactor,
+            state.streamFsrTargetHeight, state.streamDraftFsrTargetHeight,
             state.streamFrameWait, state.streamDraftFrameWait, state.streamNewStatsUi,
             state.streamDraftNewStatsUi, state.streamStatsSettingsOpen, state.streamStatsSettingsPage,
             state.streamStatsSettingsRow, state.streamStatsUiConfig, state.streamDraftStatsUiConfig,
@@ -805,7 +820,13 @@ xc::stream::GamepadFrame readStreamGamepad(const Controller& controller);
 
 void* sessionWorker(void* opaque) {
     struct ResumeBackgroundOnExit {
-        ~ResumeBackgroundOnExit() { xc::net::pauseBackgroundHttp(false); }
+        bool active = true;
+        void resume() {
+            if (!active) return;
+            xc::net::pauseBackgroundHttp(false);
+            active = false;
+        }
+        ~ResumeBackgroundOnExit() { resume(); }
     } resumeBackgroundOnExit;
     std::unique_ptr<SessionJob> job(static_cast<SessionJob*>(opaque));
     auto& state = *job->state;
@@ -1006,7 +1027,7 @@ void* sessionWorker(void* opaque) {
                 state.streamBitrateCap = streamProfile.maxBitrate;
                 state.streamSettingsOpen = false;
                 state.streamMenuCard = 0;
-                state.streamVolume = 100;
+                state.streamVolume = streamProfile.volume;
                 state.streamAudioAvailable = audioEnabled;
                 state.streamAutoReset = streamProfile.automaticVideoReset;
                 state.streamStatsMode = streamProfile.statsMode;
@@ -1018,7 +1039,7 @@ void* sessionWorker(void* opaque) {
                 state.streamUpscaler = streamProfile.upscaler;
                 state.streamRcasSharpness = streamProfile.rcasSharpness;
                 state.streamNativeRcas = streamProfile.nativeRcas;
-                state.streamFsrScaleFactor = streamProfile.fsrScaleFactor;
+                state.streamFsrTargetHeight = streamProfile.fsrTargetHeight;
                 state.streamFrameWait = streamProfile.frameWait;
                 state.streamFsrSettingsOpen = false;
             }
@@ -1039,7 +1060,8 @@ void* sessionWorker(void* opaque) {
             bool previousCircle = false, previousCross = false, previousTriangle = false;
             bool settingsOpen = false, settingsOpenLatched = false;
             uint8_t menuCard = 0;
-            uint32_t gameVolume = 100;
+            uint32_t gameVolume = streamProfile.volume;
+            audioPlayer->setVolume(gameVolume);
             bool previousL1 = false, previousR1 = false;
             uint64_t optionsHeldSince = 0;
             uint64_t nextSettingsRepeatAt = 0;
@@ -1059,7 +1081,7 @@ void* sessionWorker(void* opaque) {
             uint32_t draftFrameWait = streamProfile.frameWait;
             uint32_t draftRcasSharpness = streamProfile.rcasSharpness;
             bool draftNativeRcas = streamProfile.nativeRcas;
-            uint32_t draftFsrScaleFactor = streamProfile.fsrScaleFactor;
+            uint32_t draftFsrTargetHeight = streamProfile.fsrTargetHeight;
             bool fsrSettingsOpen = false;
             uint8_t fsrSettingsRow = 0;
             bool fsrExperimentalUnlocked = false, fsrExperimentalChordLatched = false;
@@ -1083,6 +1105,7 @@ void* sessionWorker(void* opaque) {
             uint64_t latestGamepadSampleAtMs = 0;
             uint64_t latestGamepadGeneration = 0;
             std::atomic<bool> inputMuted{false};
+            std::atomic<bool> waitForInputRelease{false};
             std::atomic<uint64_t> guidePulseUntil{0};
             std::atomic<bool> stopInputPoll{false};
             std::atomic<bool> stopGamepadSender{false};
@@ -1150,6 +1173,22 @@ void* sessionWorker(void* opaque) {
                     if (job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_LEFT_STICK) &&
                         job->controller->button(SDL_GAMEPAD_BUTTON_RIGHT_STICK))
                         sampled.buttons &= ~(xc::stream::kLeftThumb | xc::stream::kRightThumb);
+                    if (waitForInputRelease.load(std::memory_order_acquire)) {
+                        constexpr float kNeutralAxis = 0.08f;
+                        const bool controlsNeutral = sampled.buttons == 0 &&
+                            std::fabs(sampled.leftX) <= kNeutralAxis &&
+                            std::fabs(sampled.leftY) <= kNeutralAxis &&
+                            std::fabs(sampled.rightX) <= kNeutralAxis &&
+                            std::fabs(sampled.rightY) <= kNeutralAxis &&
+                            sampled.leftTrigger <= kNeutralAxis &&
+                            sampled.rightTrigger <= kNeutralAxis;
+                        sampled = {};
+                        if (controlsNeutral) {
+                            waitForInputRelease.store(false, std::memory_order_release);
+                            inputMuted.store(false, std::memory_order_release);
+                            logLine("GAMEPAD input ownership=game resumed=1 reason=all_controls_released");
+                        }
+                    }
                     if (inputMuted.load(std::memory_order_acquire)) sampled = {};
                     {
                         std::lock_guard<std::mutex> lock(sendStateMutex);
@@ -1178,6 +1217,10 @@ void* sessionWorker(void* opaque) {
                         sampleAtMs = latestGamepadSampleAtMs;
                         generation = latestGamepadGeneration;
                     }
+                    // A pre-close sample can still be waiting in this worker. Never
+                    // forward it while the dock owns input or awaits button release.
+                    if (inputMuted.load(std::memory_order_acquire) ||
+                        waitForInputRelease.load(std::memory_order_acquire)) frame = {};
                     const uint64_t nowMs = sceKernelGetProcessTime() / 1000u;
                     if (stream.isOpen()) {
                         const uint64_t callStartUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1339,7 +1382,7 @@ void* sessionWorker(void* opaque) {
                     }
                     if (options) {
                         if (!optionsHeldSince) optionsHeldSince = now;
-                        if (!settingsOpen && !settingsOpenLatched && now - optionsHeldSince >= 1000) {
+                        if (!settingsOpen && !settingsOpenLatched && now - optionsHeldSince >= 700) {
                             settingsOpen = true;
                             menuCard = 0;
                             inputMuted.store(true, std::memory_order_release);
@@ -1361,7 +1404,7 @@ void* sessionWorker(void* opaque) {
                             draftFrameWait = streamProfile.frameWait;
                             draftRcasSharpness = streamProfile.rcasSharpness;
                             draftNativeRcas = streamProfile.nativeRcas;
-                            draftFsrScaleFactor = streamProfile.fsrScaleFactor;
+                            draftFsrTargetHeight = streamProfile.fsrTargetHeight;
                             fsrSettingsOpen = false;
                             fsrExperimentalUnlocked = false;
                             fsrExperimentalChordLatched = false;
@@ -1392,8 +1435,8 @@ void* sessionWorker(void* opaque) {
                                 state.streamDraftRcasSharpness = draftRcasSharpness;
                                 state.streamNativeRcas = streamProfile.nativeRcas;
                                 state.streamDraftNativeRcas = draftNativeRcas;
-                                state.streamFsrScaleFactor = streamProfile.fsrScaleFactor;
-                                state.streamDraftFsrScaleFactor = draftFsrScaleFactor;
+                                state.streamFsrTargetHeight = streamProfile.fsrTargetHeight;
+                                state.streamDraftFsrTargetHeight = draftFsrTargetHeight;
                             state.streamDraftFrameWait = draftFrameWait;
                                 ++state.generation;
                             }
@@ -1481,11 +1524,23 @@ void* sessionWorker(void* opaque) {
                             state.streamUpscaler = value.upscaler;
                             state.streamRcasSharpness = value.rcasSharpness;
                             state.streamNativeRcas = value.nativeRcas;
-                            state.streamFsrScaleFactor = value.fsrScaleFactor;
+                            state.streamFsrTargetHeight = value.fsrTargetHeight;
                             state.streamFrameWait = value.frameWait;
                             state.streamTier = value.tier;
                             state.streamBitrateCap = value.maxBitrate;
                             ++state.generation;
+                        };
+                        auto autoSaveLiveSettings = [&](const char* reason) {
+                            // Every directional adjustment is committed immediately.
+                            // Keep Back from restoring a stale pre-edit snapshot.
+                            settingsOriginal = streamProfile;
+                            profileToSave = streamProfile;
+                            queueProfileWrite(profileToSave);
+                            logLine("stream_settings action=autosave reason=%s tier=%s bitrate=%u fps=%u upscaler=%u rcas_level=%u easu_target_height=%u volume=%u persisted=queued",
+                                    reason, tierLabel(streamProfile.tier), streamProfile.maxBitrate,
+                                    streamProfile.frameRate, streamProfile.upscaler,
+                                    streamProfile.rcasSharpness, streamProfile.fsrTargetHeight,
+                                    streamProfile.volume);
                         };
                         if (menuCard == 4 && cross && !previousCross) {
                             {
@@ -1498,7 +1553,9 @@ void* sessionWorker(void* opaque) {
                                 state.stage = LoginStage::SessionStopping;
                                 ++state.generation;
                             }
-                            inputMuted.store(false, std::memory_order_release);
+                            // Keep the exit-confirm button local while the worker tears
+                            // down the session; the sender is stopped immediately below.
+                            inputMuted.store(true, std::memory_order_release);
                             requestedStop = true;
                             logLine("stream exit requested via=dock_exit_confirm shutdown=stream_worker");
                             break;
@@ -1528,13 +1585,13 @@ void* sessionWorker(void* opaque) {
                         } else if (circle && !previousCircle) {
                             updateLiveSettings(settingsOriginal);
                             settingsOpen = false;
-                            inputMuted.store(false, std::memory_order_release);
+                            waitForInputRelease.store(true, std::memory_order_release);
                             {
                                 std::lock_guard<std::mutex> lock(state.mutex);
                                 state.streamSettingsOpen = false;
                                 ++state.generation;
                             }
-                            logLine("stream_settings action=cancel tier=%s bitrate_cap=%u",
+                            logLine("stream_settings action=close_auto_saved tier=%s bitrate_cap=%u",
                                     tierLabel(streamProfile.tier), streamProfile.maxBitrate);
                         } else if (statsSettingsOpen && cross && !previousCross) {
                             StreamProfile statsProfileToSave=settingsOriginal;
@@ -1556,7 +1613,7 @@ void* sessionWorker(void* opaque) {
                                 state.streamStatsSettingsOpen = false;
                                 ++state.generation;
                             }
-                            logLine("stream_stats_ui action=save variant=%u fallback=legacy_available metrics=%u,%u,%u,%u,%u,%u,%u",
+                            logLine("stream_stats_ui action=close_auto_saved variant=%u fallback=legacy_available metrics=%u,%u,%u,%u,%u,%u,%u",
                                     draftStatsUiConfig.variant, draftStatsUiConfig.metricMode[0],
                                     draftStatsUiConfig.metricMode[1], draftStatsUiConfig.metricMode[2],
                                     draftStatsUiConfig.metricMode[3], draftStatsUiConfig.metricMode[4],
@@ -1569,16 +1626,30 @@ void* sessionWorker(void* opaque) {
                             state.streamStatsSettingsPage = 0;
                             state.streamStatsSettingsRow = 0;
                             ++state.generation;
-                        } else if (cross && !previousCross && menuCard == 2) {
-                            gameVolume = gameVolume == 0 ? 100 : 0;
+                        } else if (menuCard == 2 &&
+                                   ((cross && !previousCross) || (triangle && !previousTriangle))) {
+                            if (gameVolume == 0) {
+                                gameVolume = streamProfile.lastAudibleVolume;
+                            } else {
+                                streamProfile.lastAudibleVolume = gameVolume;
+                                gameVolume = 0;
+                            }
                             audioPlayer->setVolume(gameVolume);
+                            streamProfile.volume = gameVolume;
+                            settingsOriginal.volume = gameVolume;
+                            settingsOriginal.lastAudibleVolume = streamProfile.lastAudibleVolume;
+                            // Save volume against the last confirmed profile, not
+                            // other image settings that may only be previewed.
+                            profileToSave = settingsOriginal;
+                            queueProfileWrite(profileToSave);
                             {
                                 std::lock_guard<std::mutex> lock(state.mutex);
                                 state.streamVolume = gameVolume;
                                 ++state.generation;
                             }
-                            logLine("stream_menu volume=%u action=toggle_mute audio_available=%u scope=local_playback",
-                                    gameVolume, audioEnabled ? 1u : 0u);
+                            logLine("stream_menu volume=%u action=toggle_mute via=%s persisted=queued audio_available=%u scope=local_playback",
+                                    gameVolume, triangle && !previousTriangle ? "triangle" : "cross",
+                                    audioEnabled ? 1u : 0u);
                         } else if (cross && !previousCross) {
                             const bool resolutionChanged = streamProfile.tier != draftTier;
                             streamProfile.tier = draftTier;
@@ -1594,7 +1665,7 @@ void* sessionWorker(void* opaque) {
                             streamProfile.frameWait = draftFrameWait;
                             streamProfile.rcasSharpness = draftRcasSharpness;
                             streamProfile.nativeRcas = draftNativeRcas;
-                            streamProfile.fsrScaleFactor = draftFsrScaleFactor;
+                            streamProfile.fsrTargetHeight = draftFsrTargetHeight;
                             logLine("stream_fps local_target=%u server_sdp_applies=next_session received_60fps_must_still_decode_all_references=1", draftFps);
                             if (resolutionChanged)
                                 pendingResolution.store(streamProfile.tier == "1080" ? 1080 : 720);
@@ -1617,8 +1688,8 @@ void* sessionWorker(void* opaque) {
                                 state.streamRcasSharpness = streamProfile.rcasSharpness;
                                 state.streamNativeRcas = streamProfile.nativeRcas;
                                 state.streamDraftNativeRcas = streamProfile.nativeRcas;
-                                state.streamFsrScaleFactor = streamProfile.fsrScaleFactor;
-                                state.streamDraftFsrScaleFactor = streamProfile.fsrScaleFactor;
+                                state.streamFsrTargetHeight = streamProfile.fsrTargetHeight;
+                                state.streamDraftFsrTargetHeight = streamProfile.fsrTargetHeight;
                 state.streamFrameWait = streamProfile.frameWait;
                                 state.streamFsrSettingsOpen = false;
                                 state.streamTier = streamProfile.tier;
@@ -1627,17 +1698,30 @@ void* sessionWorker(void* opaque) {
                                 ++state.generation;
                             }
                             settingsOpen = false;
-                            inputMuted.store(false, std::memory_order_release);
-                            logLine("stream_settings action=apply requested_tier=%s remb_cap=%u automatic_video_reset=%u stats_mode=%u native_rcas_experimental=%u fsr_scale_factor=%ux priority=user_selection auto_downshift=disabled applies_live=1 session_restart=0",
+                            waitForInputRelease.store(true, std::memory_order_release);
+                            logLine("stream_settings action=close_auto_saved requested_tier=%s remb_cap=%u automatic_video_reset=%u stats_mode=%u native_rcas_experimental=%u fsr_easu_target_height=%u priority=user_selection auto_downshift=disabled applies_live=1 session_restart=0",
                                     tierLabel(streamProfile.tier), streamProfile.maxBitrate,
                                     streamProfile.automaticVideoReset ? 1u : 0u,
                                     static_cast<unsigned>(streamProfile.statsMode),
-                                    streamProfile.nativeRcas ? 1u : 0u, streamProfile.fsrScaleFactor);
+                                    streamProfile.nativeRcas ? 1u : 0u, streamProfile.fsrTargetHeight);
+                            logLine("stream_settings action=close_auto_saved_video tier=%s upscaler=%s rcas_level=%u rcas_sharpness_pct=%u easu_target_height=%u volume=%u persisted=queued",
+                                    tierLabel(streamProfile.tier),
+                                    streamProfile.upscaler == 1 ? "fsr1" : streamProfile.upscaler == 2 ? "native_1to1" : "bilinear",
+                                    streamProfile.rcasSharpness, (4u - streamProfile.rcasSharpness) * 25u,
+                                    streamProfile.fsrTargetHeight, streamProfile.volume);
                         } else if (menuCard == 2 && (dpadLeft || dpadRight) && now >= nextSettingsRepeatAt) {
                             const uint32_t previousVolume = gameVolume;
                             if (dpadLeft) gameVolume = gameVolume > 4 ? gameVolume - 5 : 0;
                             else gameVolume = std::min<uint32_t>(100, gameVolume + 5);
+                            if (gameVolume > 0)
+                                streamProfile.lastAudibleVolume = gameVolume;
                             audioPlayer->setVolume(gameVolume);
+                            streamProfile.volume = gameVolume;
+                            settingsOriginal.volume = gameVolume;
+                            settingsOriginal.lastAudibleVolume = streamProfile.lastAudibleVolume;
+                            // Volume is immediate; keep unconfirmed image drafts transient.
+                            profileToSave = settingsOriginal;
+                            queueProfileWrite(profileToSave);
                             nextSettingsRepeatAt = now + 120;
                             {
                                 std::lock_guard<std::mutex> lock(state.mutex);
@@ -1645,7 +1729,7 @@ void* sessionWorker(void* opaque) {
                                 ++state.generation;
                             }
                             if ((previousVolume / 10) != (gameVolume / 10) || gameVolume == 0 || gameVolume == 100)
-                                logLine("stream_menu volume=%u audio_available=%u scope=local_playback",
+                                logLine("stream_menu volume=%u persisted=queued audio_available=%u scope=local_playback",
                                         gameVolume, audioEnabled ? 1u : 0u);
                         } else if ((menuCard == 0 || menuCard == 3) && (dpadUp || dpadDown || dpadLeft || dpadRight) && now >= nextSettingsRepeatAt) {
                             if (statsSettingsOpen && menuCard == 3) {
@@ -1653,48 +1737,65 @@ void* sessionWorker(void* opaque) {
                                     statsSettingsRow=xc::ps4::streamStatsSettingsNextRow(statsSettingsPage,statsSettingsRow,dpadDown?1:-1);
                                 } else {
                                     xc::ps4::adjustStreamStatsSettings(draftStatsUiConfig,statsSettingsPage,statsSettingsRow,dpadRight?1:-1);
+                                    draftNewStatsUi=true;
+                                    streamProfile.statsUiConfig=draftStatsUiConfig;
+                                    streamProfile.newStatsUiEnabled=true;
+                                    autoSaveLiveSettings("stats_osd");
                                 }
                                 nextSettingsRepeatAt=now+220;
                                 std::lock_guard<std::mutex> lock(state.mutex);
                                 state.streamStatsSettingsOpen=true;
                                 state.streamStatsSettingsPage=statsSettingsPage;
                                 state.streamStatsSettingsRow=statsSettingsRow;
+                                state.streamStatsUiConfig=draftStatsUiConfig;
                                 state.streamDraftStatsUiConfig=draftStatsUiConfig;
+                                state.streamNewStatsUi=draftNewStatsUi;
+                                state.streamDraftNewStatsUi=draftNewStatsUi;
                                 ++state.generation;
                             } else if (fsrSettingsOpen) {
                                 if (dpadUp || dpadDown) {
-                                    fsrSettingsRow = static_cast<uint8_t>((fsrSettingsRow + 1) % (fsrExperimentalUnlocked ? 4 : 3));
+                                    const uint8_t rowCount = fsrExperimentalUnlocked ? 4 : 3;
+                                    fsrSettingsRow = static_cast<uint8_t>((fsrSettingsRow + (dpadUp ? rowCount - 1 : 1)) % rowCount);
                                     {
                                         std::lock_guard<std::mutex> lock(state.mutex);
                                         state.streamFsrSettingsRow = fsrSettingsRow;
                                     }
                                 } else if (fsrSettingsRow == 0) {
-                                    if (dpadLeft) draftRcasSharpness = draftRcasSharpness == 0 ? 4 : draftRcasSharpness - 1;
-                                    else draftRcasSharpness = (draftRcasSharpness + 1) % 5;
+                                    // Slider grows toward the right: 0% (RCAS attenuation 2.0 stops)
+                                    // at the left, maximum sharpening (0 stops) at the right.
+                                    if (dpadLeft) draftRcasSharpness = std::min<uint32_t>(4, draftRcasSharpness + 1);
+                                    else draftRcasSharpness = draftRcasSharpness ? draftRcasSharpness - 1 : 0;
                                     StreamProfile preview = streamProfile;
                                     preview.rcasSharpness = draftRcasSharpness;
                                     updateLiveSettings(preview);
-                                    logLine("stream_settings action=preview submenu=fsr field=rcas_sharpness level=%u attenuation_stops=%.2f persisted=0", draftRcasSharpness, draftRcasSharpness * 0.5);
+                                    autoSaveLiveSettings("rcas");
+                                    logLine("stream_settings action=preview submenu=fsr field=rcas_sharpness level=%u sharpness_pct=%u attenuation_stops=%.2f persisted=queued",
+                                            draftRcasSharpness, (4u - draftRcasSharpness) * 25u, draftRcasSharpness * 0.5);
                                 } else if (fsrSettingsRow == 1) {
-                                    draftFsrScaleFactor = draftFsrScaleFactor == 1 ? 2 : 1;
+                                    constexpr uint32_t targets[]{1080, 1440, 2160};
+                                    const uint32_t index = draftFsrTargetHeight == 1440 ? 1 : draftFsrTargetHeight == 2160 ? 2 : 0;
+                                    draftFsrTargetHeight = targets[(index + (dpadLeft ? 2 : 1)) % 3];
                                     StreamProfile preview = streamProfile;
-                                    preview.fsrScaleFactor = draftFsrScaleFactor;
+                                    preview.fsrTargetHeight = draftFsrTargetHeight;
                                     updateLiveSettings(preview);
-                                    logLine("stream_settings action=preview submenu=fsr field=scale_factor value=%ux experimental=1 target=intermediate_then_downsample persisted=0",
-                                            draftFsrScaleFactor);
+                                    autoSaveLiveSettings("easu_target");
+                                    logLine("stream_settings action=preview submenu=fsr field=easu_target height=%u experimental=1 target=absolute_resolution persisted=queued",
+                                            draftFsrTargetHeight);
                                 } else if (fsrSettingsRow == 2) {
                                     draftUpscaler = dpadLeft ? (draftUpscaler + 2) % 3 : (draftUpscaler + 1) % 3;
                                     StreamProfile preview = streamProfile;
                                     preview.upscaler = draftUpscaler;
                                     updateLiveSettings(preview);
-                                    logLine("stream_settings action=preview submenu=fsr field=upscaler value=%s persisted=0",
+                                    autoSaveLiveSettings("upscaler");
+                                    logLine("stream_settings action=preview submenu=fsr field=upscaler value=%s persisted=queued",
                                             draftUpscaler == 1 ? "fsr1" : draftUpscaler == 2 ? "native_1to1" : "bilinear");
                                 } else {
                                     draftNativeRcas = !draftNativeRcas;
                                     StreamProfile preview = streamProfile;
                                     preview.nativeRcas = draftNativeRcas;
                                     updateLiveSettings(preview);
-                                    logLine("stream_settings action=preview submenu=fsr field=native_rcas_1080_experimental enabled=%u persisted=0",
+                                    autoSaveLiveSettings("native_rcas");
+                                    logLine("stream_settings action=preview submenu=fsr field=native_rcas_1080_experimental enabled=%u persisted=queued",
                                             draftNativeRcas ? 1u : 0u);
                                 }
                             } else if (dpadUp) settingsRow = xc::ps4::streamMenuNextRow(menuCard, settingsRow, -1, draftBitrateCustom);
@@ -1731,6 +1832,8 @@ void* sessionWorker(void* opaque) {
                                 StreamProfile preview = streamProfile;
                                 preview.tier = draftTier;
                                 preview.maxBitrate = draftBitrate;
+                                preview.bitrateCustom = draftBitrateCustom;
+                                preview.lastCustomBitrate = draftLastCustomBitrate;
                                 preview.frameRate = draftFps;
                                 preview.automaticVideoReset = draftAutoReset;
                                 preview.frameWait = draftFrameWait;
@@ -1740,7 +1843,8 @@ void* sessionWorker(void* opaque) {
                                 preview.newStatsUiEnabled = draftNewStatsUi;
                                 preview.statsUiConfig = draftStatsUiConfig;
                                 updateLiveSettings(preview);
-                                logLine("stream_settings action=preview row=%d tier=%s remb_cap=%u fps=%u upscaler=%u automatic_video_reset=%u stats_mode=%u persisted=0",
+                                autoSaveLiveSettings("menu_option");
+                                logLine("stream_settings action=preview row=%d tier=%s remb_cap=%u fps=%u upscaler=%u automatic_video_reset=%u stats_mode=%u persisted=queued",
                                     settingsRow, tierLabel(draftTier), draftBitrate, draftFps,
                                     draftUpscaler, draftAutoReset ? 1u : 0u, static_cast<unsigned>(draftStatsMode));
                             }
@@ -1759,8 +1863,8 @@ void* sessionWorker(void* opaque) {
                             state.streamDraftRcasSharpness = draftRcasSharpness;
                             state.streamNativeRcas = streamProfile.nativeRcas;
                             state.streamDraftNativeRcas = draftNativeRcas;
-                            state.streamFsrScaleFactor = streamProfile.fsrScaleFactor;
-                            state.streamDraftFsrScaleFactor = draftFsrScaleFactor;
+                            state.streamFsrTargetHeight = streamProfile.fsrTargetHeight;
+                            state.streamDraftFsrTargetHeight = draftFsrTargetHeight;
                             state.streamDraftFrameWait = draftFrameWait;
                             state.streamFsrSettingsOpen = fsrSettingsOpen;
                             ++state.generation;
@@ -1955,7 +2059,7 @@ void* sessionWorker(void* opaque) {
                 sceKernelUsleep(4000);
             }
             stopInputPoll.store(true, std::memory_order_release);
-            inputMuted.store(false, std::memory_order_release);
+            inputMuted.store(true, std::memory_order_release);
             stopGamepadSender.store(true, std::memory_order_release);
             sendStateChanged.notify_all();
             maintenanceStop.store(true);
@@ -1969,6 +2073,10 @@ void* sessionWorker(void* opaque) {
             if (performanceWindows != 0) saveStreamProfile(profileToSave);
             job->video->stop();
             job->gssv->stopSession();
+            wipe(job->refreshToken);
+            // A new session may start as soon as Library is published. Release the
+            // shared HTTP lease first so the prior worker cannot race that startup.
+            resumeBackgroundOnExit.resume();
             if (requestedStop) {
                 std::lock_guard<std::mutex> lock(state.mutex);
                 state.stage = LoginStage::Library;
@@ -1982,7 +2090,6 @@ void* sessionWorker(void* opaque) {
             } else {
                 logLine("cloud stream ended");
             }
-            wipe(job->refreshToken);
             return nullptr;
         }
         sceKernelUsleep(1000000);
@@ -2261,6 +2368,8 @@ std::vector<xc::ui::GameTile> makeGameTiles(const std::vector<xc::xcloud::Title>
         tile.heroUrl = title.imageUrl;
         tile.playable = true;
         tile.freeInStore = title.isFreeInStore;
+        // The API can prove an entitlement outside subscription programs, not every purchase.
+        tile.accountOwned = title.hasEntitlement && !title.viaSubscription;
         tiles.push_back(std::move(tile));
     }
     return tiles;
@@ -2273,7 +2382,7 @@ void loadPs5LibraryUi(xc::ui::AppUi& appUi, const LoginSnapshot& state) {
     appUi.setLoading(state.libraryLoading, state.libraryLoaded, 0);
     appUi.setProfile(state.gamertag, {});
     appUi.showHome("PSBOX");
-    appUi.showTab(xc::ui::Tab::Library);
+    appUi.showTab(xc::ui::Tab::GamePass);
 }
 
 void updatePs5LibraryUi(xc::ui::AppUi& appUi, const LoginSnapshot& state) {
@@ -2303,6 +2412,7 @@ size_t jumpToAdjacentInitial(const std::vector<xc::xcloud::Title>& titles, size_
 
 void drawLoginScreen(xc::ui::Canvas& canvas, xc::ui::Fonts& fonts, const LoginSnapshot& s, const xc::ui::Image* banner = nullptr) {
     using namespace xc::ui;
+    canvas.beginGpuFrame();
     static const std::vector<xc::xcloud::Title> kNoTitles;
     const auto& titles = s.visibleTitles ? *s.visibleTitles : kNoTitles;
     const bool loadingGame = s.stage == LoginStage::SessionStarting ||
@@ -2317,6 +2427,7 @@ void drawLoginScreen(xc::ui::Canvas& canvas, xc::ui::Fonts& fonts, const LoginSn
         drawBrandMark(canvas, 1430.0f, 450.0f, 170.0f, rgba(238, 239, 236));
     }
     fonts.bold.draw(canvas, "PSBOX", 150, 235, 68, rgba(255, 255, 255));
+    fonts.regular.draw(canvas, kBuild, 150, 300, 19, rgba(174, 188, 174));
     canvas.fillRect({150, 345, 82, 8}, rgba(168, 196, 207), 4);
     const bool inLibrary = s.stage == LoginStage::Library || s.stage == LoginStage::SessionStarting ||
                            s.stage == LoginStage::SessionProvisioning || s.stage == LoginStage::SessionReady;
@@ -2471,7 +2582,7 @@ void drawLoginScreen(xc::ui::Canvas& canvas, xc::ui::Fonts& fonts, const LoginSn
     canvas.strokeRect({150, 900, 760, 72}, rgba(71, 118, 73, 255), 2, 14);
     const char* footer = s.stage == LoginStage::Library ? "Up/Down: browse    L1/R1: previous/next letter    X: request session" :
                          s.stage == LoginStage::SessionReady ? "Circle: return to library" :
-                         s.stage == LoginStage::Streaming ? "Touchpad: Guide    Hold Options 1s: settings    Triangle: FSR options" :
+                         s.stage == LoginStage::Streaming ? "Touchpad: Guide    Hold Options 0.7s: settings    Triangle: FSR options" :
                          s.stage == LoginStage::SessionStopping ? "Closing session; please wait" :
                          s.stage == LoginStage::Failed && !titles.empty() ? "Circle: return to library" :
                          s.stage == LoginStage::SessionProvisioning || s.stage == LoginStage::SessionStarting
@@ -2505,9 +2616,10 @@ xc::ps4::StreamMenuUiState makeStreamMenuUiState(const LoginSnapshot& state) {
     menu.fps = state.streamDraftFrameRate;
     menu.upscaler = state.streamDraftUpscaler;
     menu.rcasSharpness = state.streamDraftRcasSharpness;
-    menu.fsrScaleFactor = state.streamDraftFsrScaleFactor;
+    menu.fsrTargetHeight = state.streamDraftFsrTargetHeight;
     menu.frameWait = state.streamDraftFrameWait;
     menu.volume = state.streamVolume;
+    menu.gpuVideoActive = state.gpuVideoActive;
     menu.width = state.streamWidth;
     menu.height = state.streamHeight;
     menu.rttMs = state.streamRttMs;
@@ -2566,6 +2678,7 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
                                                const xc::ps4::PresentationStats& presentation,
                                                bool gpuVideoEnabled) {
     auto& context = *static_cast<DrawContext*>(opaque);
+    static bool libraryRendererLogged = false;
     if (context.video) context.video->setGpuVideoEnabled(gpuVideoEnabled);
     {
         std::lock_guard<std::mutex> lock(context.state->mutex);
@@ -2590,6 +2703,14 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
                 stats.diskEnabled ? 1 : 0,
                 static_cast<unsigned long long>(stats.diskReadErrors),
                 static_cast<unsigned long long>(stats.diskWriteErrors));
+    }
+    if (state.stage == LoginStage::Library && !libraryRendererLogged) {
+        logLine("library_ui layout=%s renderer=%s image_cache=/data/PSBOX/image-cache-v2 stream_settings=%s composition=Vulkan_with_canvas_fallback",
+                PSBOX_DEFAULT_NEW_LIBRARY_UI ? "new" : "legacy",
+                !gpuVideoEnabled ? "software_canvas_fallback" :
+                    PSBOX_DEFAULT_NEW_LIBRARY_UI ? "vulkan_quads_text_plus_canvas_art" : "vulkan_text_legacy_layout",
+                kStreamProfilePath);
+        libraryRendererLogged = true;
     }
     // UI-thread-only animation state, shared with the native PC preview.
     static xc::ps4::StreamMenuUiAnimation dockAnimation;
@@ -2632,8 +2753,15 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
     const auto nav = state.stage == LoginStage::Streaming
         ? xc::ui::NavInput{} : readNavInput(context, now);
 
-    context.canvas->enableGpuUi(gpuVideoEnabled && state.stage == LoginStage::Streaming &&
-                                context.video && context.video->hasFrame());
+    const bool newCatalogGpuUi = gpuVideoEnabled && state.stage == LoginStage::Library &&
+                                 PSBOX_DEFAULT_NEW_LIBRARY_UI;
+    const bool streamGpuUi = gpuVideoEnabled &&
+        ((state.stage == LoginStage::Streaming && context.video && context.video->hasFrame()) ||
+         newCatalogGpuUi);
+    const bool wasGpuText = context.canvas->gpuTextEnabled();
+    context.canvas->enableGpuUi(streamGpuUi);
+    context.canvas->enableGpuText(gpuVideoEnabled && state.stage != LoginStage::Streaming);
+    if (wasGpuText != context.canvas->gpuTextEnabled()) context.lastGeneration = UINT64_MAX;
     if (context.video) { context.video->setPresentationFps(state.streamFrameRate); context.video->setPlayoutDelayFrames(state.streamFrameWait); }
     const bool enteringStream = context.previousStage != LoginStage::Streaming &&
                                 state.stage == LoginStage::Streaming;
@@ -2767,7 +2895,7 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
                                     state.generation != context.lastGeneration ||
                                     (settingsShouldDraw && settingsAnimationActive) ||
                                     (settingsShouldDraw && (menuCardAnimationActive || pageAnimationActive || dockAnimation.active(now)));
-            if (!hudChanged) return {false, false, gpuVideoEnabled, context.canvas, state.streamFrameRate, state.streamUpscaler, state.streamRcasSharpness, state.streamNativeRcas, state.streamFsrScaleFactor, state.streamTier == "1080"};
+            if (!hudChanged) return {false, false, gpuVideoEnabled, context.canvas, state.streamFrameRate, state.streamUpscaler, state.streamRcasSharpness, state.streamNativeRcas, state.streamFsrTargetHeight, state.streamTier == "1080"};
             if (gpuVideoEnabled) context.canvas->clearTransparent();
             if (state.streamStatsMode == 1) {
                 xc::ps4::StreamStatsUiData compact;
@@ -2851,7 +2979,7 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
             legacy.rows[6]=cpu;
             const char* controls = state.streamTransportLost
                 ? "Last frame held. Open Options and select the red exit button to return to the library."
-                : "Touchpad: Guide   Hold Options 1s: settings   L3+R3 (1s): reset video";
+                : "Touchpad: Guide   Hold Options 0.7s: settings   L3+R3 (1s): reset video";
             legacy.controls=controls;
             xc::ps4::drawStreamLegacyStatsUi(*context.canvas,*context.fonts,legacy);
                 }
@@ -2863,18 +2991,25 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
             context.lastStreamStatsGeneration = state.streamStatsGeneration;
             context.lastHudTransportLost = state.streamTransportLost;
             context.lastGeneration = state.generation;
-            return {hudChanged, newFrame, true, context.canvas, state.streamFrameRate, state.streamUpscaler, state.streamRcasSharpness, state.streamNativeRcas, state.streamFsrScaleFactor, state.streamTier == "1080"};
+            return {hudChanged, newFrame, true, context.canvas, state.streamFrameRate, state.streamUpscaler, state.streamRcasSharpness, state.streamNativeRcas, state.streamFsrTargetHeight, state.streamTier == "1080"};
         }
-        if (gpuVideoEnabled) return {gpuVideoEnabled && enteringStream, false, true, nullptr, state.streamFrameRate, state.streamUpscaler, state.streamRcasSharpness, state.streamNativeRcas, state.streamFsrScaleFactor, state.streamTier == "1080"};
+        if (gpuVideoEnabled) return {gpuVideoEnabled && enteringStream, false, true,
+            streamGpuUi ? context.canvas : nullptr, state.streamFrameRate, state.streamUpscaler,
+            state.streamRcasSharpness, state.streamNativeRcas, state.streamFsrTargetHeight,
+            state.streamTier == "1080"};
         if (state.generation != context.lastGeneration || (settingsShouldDraw &&
             (settingsAnimationActive || pageAnimationActive || menuCardAnimationActive || dockAnimation.active(now)))) {
             drawLoginScreen(*context.canvas, *context.fonts, state, context.loadingBanner.get());
             if (settingsShouldDraw) xc::ps4::drawStreamMenuUi(*context.canvas, *context.fonts, makeStreamMenuUiState(state),
                 now, settingsVisibility, settingsPageProgress, menuCardProgress, &dockAnimation);
             context.lastGeneration = state.generation;
-            return {true, newFrame, false, nullptr, state.streamFrameRate, state.streamUpscaler, state.streamRcasSharpness, state.streamNativeRcas, state.streamFsrScaleFactor, state.streamTier == "1080"};
+            return {true, newFrame, false, gpuVideoEnabled ? context.canvas : nullptr,
+                state.streamFrameRate, state.streamUpscaler, state.streamRcasSharpness,
+                state.streamNativeRcas, state.streamFsrTargetHeight, state.streamTier == "1080"};
         }
-        return {false, newFrame, false, nullptr, state.streamFrameRate, state.streamUpscaler, state.streamRcasSharpness, state.streamNativeRcas, state.streamFsrScaleFactor, state.streamTier == "1080"};
+        return {false, newFrame, false, gpuVideoEnabled ? context.canvas : nullptr,
+            state.streamFrameRate, state.streamUpscaler, state.streamRcasSharpness,
+            state.streamNativeRcas, state.streamFsrTargetHeight, state.streamTier == "1080"};
     }
 
     if (state.stage == LoginStage::Library && context.ps5Ui) {
@@ -2919,6 +3054,7 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
         }
         const auto event = context.ps5Ui->handle(nav);
         if (event.action == xc::ui::Action::Play) {
+            context.ps5Ui->recordRecentGame(event.game);
             // Retain already-resident artwork before HTTP is paused for Play.
             // Cache lookup queues misses asynchronously; never wait or decode here.
             context.loadingBanner = context.imageCache && !event.game.heroUrl.empty()
@@ -2956,7 +3092,7 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
                 context.libraryUpdateUs = context.libraryUpdateMaxUs = 0;
                 context.librarySnapshotSamples = context.libraryRenderFrames = context.libraryUiUpdates = 0;
             }
-            return {true, false};
+            return {true, false, false, gpuVideoEnabled ? context.canvas : nullptr};
         }
         if (now - context.libraryPerfWindowStartedMs >= 5000) {
             const uint64_t windowMs = now - context.libraryPerfWindowStartedMs;
@@ -2976,7 +3112,7 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
             context.libraryUpdateUs = context.libraryUpdateMaxUs = 0;
             context.librarySnapshotSamples = context.libraryRenderFrames = context.libraryUiUpdates = 0;
         }
-        return {false, false};
+        return {false, false, false, gpuVideoEnabled ? context.canvas : nullptr};
     }
 
     if (state.stage == LoginStage::SessionReady ||
@@ -2998,13 +3134,14 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
         }
     }
 
-    if (state.generation == context.lastGeneration) return {};
+    if (state.generation == context.lastGeneration)
+        return {false, false, false, gpuVideoEnabled ? context.canvas : nullptr};
     drawLoginScreen(*context.canvas, *context.fonts, state, context.loadingBanner.get());
     context.lastGeneration = state.generation;
     logLine("login canvas state changed stage=%d qr=%s manual_code=visible",
             static_cast<int>(state.stage),
             state.verificationUriComplete.empty() ? "unavailable" : "ready");
-    return {true, false};
+    return {true, false, false, gpuVideoEnabled ? context.canvas : nullptr};
 }
 
 bool uploadLatestNv12(void* opaque, uint8_t* destination, size_t capacity,
@@ -3079,6 +3216,7 @@ int main() {
     xc::ui::ImageCache images([&] { if (appUiPtr) appUiPtr->invalidate(); },
                               2ull << 30, "/data/PSBOX/image-cache-v2", 512u << 20);
     xc::ui::AppUi appUi(fonts, images);
+    appUi.setQtLibraryUi(PSBOX_DEFAULT_NEW_LIBRARY_UI != 0);
     appUiPtr = &appUi;
     DrawContext draw{&canvas, &fonts, &state, &controller, &appUi, &videoDecoder};
     draw.imageCache = &images;

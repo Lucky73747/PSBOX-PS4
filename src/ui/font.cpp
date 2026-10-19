@@ -105,7 +105,7 @@ int Font::draw(Canvas& c, std::string_view text, int x, int y, int px, Color col
     int baseline = y + static_cast<int>(std::lround(impl_->ascent * scale(px)));
     for (size_t i = 0; i < text.size();) {
         const Glyph& g = glyph(nextCodepoint(text, i), px);
-        if (!g.bitmap.empty()) c.drawMask(g.bitmap.data(), g.w, g.h, g.w, x + g.xoff, baseline + g.yoff, color);
+        if (!g.bitmap.empty()) c.drawGlyphMask(g.bitmap.data(), g.w, g.h, g.w, x + g.xoff, baseline + g.yoff, color);
         x += g.advance;
     }
     return x;

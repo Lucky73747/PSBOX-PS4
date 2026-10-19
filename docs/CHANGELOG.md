@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1 — Development (Build 11)
+
+- Updated the PS4 library interface with recent and owned-game views, smoother catalog browsing and asynchronous artwork caching across app launches.
+- Added configurable FSR output targets and persisted stream settings.
+- Kept the previous library interface available as a build-time fallback.
+- Build 11 has been run on a PS4. Artwork cache writes are visible in the app logs; cache reuse after relaunch is still being confirmed. The library transition animation works in most cases but remains under review.
+
 ## 0.1.0 Beta — Build 1
 
 ### Initial beta

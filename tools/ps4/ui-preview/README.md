@@ -53,7 +53,7 @@ O estado de animação é da thread de desenho; mudanças interrompidas partem d
 
 ## Validação
 
-A versão animada foi compilada e aberta no Linux. Foram conferidos os quatro painéis, posições intermediárias do seletor, abertura/troca/fechamento, submenu FSR e retorno ao estado sem animação ativa. O usuário aprovou o visual da dock e os ícones PS4 na prévia do PC em 2026-10-17. Essa aprovação não valida desempenho nem execução no console. A build PS4 98 foi compilada e enviada após a aprovação do usuário; instalação/execução e desempenho no console continuam sem confirmação. O submenu FSR apresenta agora o alvo EASU calculado em pixels (por exemplo, 1920×1080 ou 3840×2160), em vez do fator 1×/2×.
+A versão animada foi compilada e aberta no Linux. Foram conferidos os quatro painéis, posições intermediárias do seletor, abertura/troca/fechamento, submenu FSR e retorno ao estado sem animação ativa. O usuário aprovou o visual da dock e os ícones PS4 na prévia do PC em 2026-10-17. Essa aprovação não valida desempenho nem execução no console. A build PS4 98 foi compilada e enviada após a aprovação do usuário; instalação/execução e desempenho no console continuam sem confirmação. O submenu FSR apresenta agora o alvo EASU calculado em pixels (1080p, 1440p ou 2160p (4K)), em vez do fator 1×/2×.
 
 Para PNG estático, quando necessário:
 
@@ -61,7 +61,7 @@ Para PNG estático, quando necessário:
 ./tools/ps4/ui-preview/build-native-preview.sh settings fsr=1 tier=1080 source=1080
 ```
 
-Também aceita `controls`, `volume`, `configuration` e ajustes demonstrativos `fsr=1`, `tier=1080`, `source=1080` (`source=720` simula fonte 720p). A linha “Alvo EASU” usa a resolução de saída e mostra 3840×2160 apenas se tier pedido, fonte e saída permitirem o caminho 2×. O PNG estático não demonstra as transições. `index.html`, `style.css` e `app.js` são o mockup anterior de três cartões.
+Também aceita `controls`, `volume`, `configuration` e ajustes demonstrativos `fsr=1`, `tier=1080`, `source=1080` (`source=720` simula fonte 720p). O campo “Resolução EASU” permite 1080p, 1440p e 2160p (4K), sem multiplicadores. Use `scale=1080`, `scale=1440` ou `scale=2160` na prévia. O renderer PS4 usa um intermediário quando o alvo excede a saída e não reduz a fonte; caso contrário, segue o caminho normal de saída. O PNG estático não demonstra as transições. `index.html`, `style.css` e `app.js` são o mockup anterior de três cartões.
 
 A tipografia do formato Cartão segue o HTML original: base 13 px e escala 120%, unidades a 85%, rótulos dos cartões a 68% e títulos de grupo a 60%. O renderer converte em para a altura nativa da fonte apenas no OSD; a dock conserva sua tipografia. Cartão põe FPS no cabeçalho e métricas agrupadas horizontalmente, Linhas é vertical e Denso distribui as métricas em duas linhas. Os comandos de abrir/salvar/voltar/paginar usam os ícones PS4 existentes.
 

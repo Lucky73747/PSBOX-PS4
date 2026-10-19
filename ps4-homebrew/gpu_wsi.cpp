@@ -135,6 +135,9 @@ struct GpuVideoRenderer {
     VkImage overlayImage = VK_NULL_HANDLE;
     VkDeviceMemory overlayMemory = VK_NULL_HANDLE;
     VkImageView overlayView = VK_NULL_HANDLE;
+    VkImage uiAtlasImage = VK_NULL_HANDLE;
+    VkDeviceMemory uiAtlasMemory = VK_NULL_HANDLE;
+    VkImageView uiAtlasView = VK_NULL_HANDLE;
     VkImage renderImage = VK_NULL_HANDLE;
     VkDeviceMemory renderMemory = VK_NULL_HANDLE;
     VkImageView renderView = VK_NULL_HANDLE;
@@ -147,6 +150,7 @@ struct GpuVideoRenderer {
     VkDescriptorSetLayout descriptorLayout = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    VkDescriptorSet uiDescriptorSet = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkRenderPass renderPass = VK_NULL_HANDLE;
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
@@ -172,6 +176,7 @@ struct GpuVideoRenderer {
     VkImageLayout yLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout uvLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout overlayLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageLayout uiAtlasLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageLayout renderLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     bool initialized = false;
     VkMemoryPropertyFlags videoMemoryFlags = 0;
@@ -253,6 +258,9 @@ bool initGpuVideoRenderer(VkPhysicalDevice physical, VkDevice device, VkFormat o
         !createGpuImage(physical, device, VK_FORMAT_R8G8B8A8_UNORM, extent,
                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                         gpu.overlayImage, gpu.overlayMemory, gpu.overlayView) ||
+        !createGpuImage(physical, device, VK_FORMAT_R8G8B8A8_UNORM, extent,
+                        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                        gpu.uiAtlasImage, gpu.uiAtlasMemory, gpu.uiAtlasView) ||
         !createGpuImage(physical, device, outputFormat, extent,
                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                         gpu.renderImage, gpu.renderMemory, gpu.renderView) ||
@@ -316,9 +324,9 @@ bool initGpuVideoRenderer(VkPhysicalDevice physical, VkDevice device, VkFormat o
     descriptorLayoutInfo.bindingCount = 3;
     descriptorLayoutInfo.pBindings = bindings;
     if (vkCreateDescriptorSetLayout(device, &descriptorLayoutInfo, nullptr, &gpu.descriptorLayout) != VK_SUCCESS) { logLine("gpu_video_init failed source_line=%d cpu_fallback=1", __LINE__); return false; }
-    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 9};
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 12};
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    poolInfo.maxSets = 3; poolInfo.poolSizeCount = 1; poolInfo.pPoolSizes = &poolSize;
+    poolInfo.maxSets = 4; poolInfo.poolSizeCount = 1; poolInfo.pPoolSizes = &poolSize;
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &gpu.descriptorPool) != VK_SUCCESS) { logLine("gpu_video_init failed source_line=%d cpu_fallback=1", __LINE__); return false; }
     VkDescriptorSetAllocateInfo setInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     setInfo.descriptorPool = gpu.descriptorPool;
@@ -337,6 +345,12 @@ bool initGpuVideoRenderer(VkPhysicalDevice physical, VkDevice device, VkFormat o
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[i].pImageInfo = &imageInfos[i];
     }
+    vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
+    if (vkAllocateDescriptorSets(device, &setInfo, &gpu.uiDescriptorSet) != VK_SUCCESS) {
+        logLine("gpu_video_init failed source_line=%d cpu_fallback=1", __LINE__); return false;
+    }
+    imageInfos[2].imageView = gpu.uiAtlasView;
+    for (uint32_t i = 0; i < 3; ++i) writes[i].dstSet = gpu.uiDescriptorSet;
     vkUpdateDescriptorSets(device, 3, writes, 0, nullptr);
     if (vkAllocateDescriptorSets(device, &setInfo, &gpu.rcasSet) != VK_SUCCESS) return false;
     VkDescriptorImageInfo rcasImages[3] = {
@@ -461,9 +475,12 @@ bool initGpuVideoRenderer(VkPhysicalDevice physical, VkDevice device, VkFormat o
     return true;
 }
 
-bool ensureSupersample2x(VkPhysicalDevice physical, GpuVideoRenderer& gpu) {
-    if (gpu.supersampleAttempted) return gpu.supersampleAvailable;
-    gpu.supersampleAttempted = true;
+bool ensureEasuTarget(VkPhysicalDevice physical, GpuVideoRenderer& gpu, VkExtent2D target) {
+    const bool sameExtent = gpu.supersampleExtent.width == target.width && gpu.supersampleExtent.height == target.height;
+    if (sameExtent && gpu.supersampleAttempted) return gpu.supersampleAvailable;
+    // Called on the renderer thread after frameFence completed: old images/descriptors
+    // are no longer owned by an in-flight submission. Reuse the allocated descriptor set.
+
     auto cleanupPartial = [&]() {
         if (gpu.supersampleFramebuffer) vkDestroyFramebuffer(gpu.device, gpu.supersampleFramebuffer, nullptr);
         if (gpu.supersampleView) vkDestroyImageView(gpu.device, gpu.supersampleView, nullptr);
@@ -474,11 +491,11 @@ bool ensureSupersample2x(VkPhysicalDevice physical, GpuVideoRenderer& gpu) {
         gpu.supersampleImage = VK_NULL_HANDLE;
         gpu.supersampleMemory = VK_NULL_HANDLE;
     };
-    if (gpu.extent.width > UINT32_MAX / 2 || gpu.extent.height > UINT32_MAX / 2) {
-        logLine("gpu_scaler supersample2x unavailable reason=extent_overflow");
-        return false;
-    }
-    gpu.supersampleExtent = {gpu.extent.width * 2, gpu.extent.height * 2};
+    cleanupPartial();
+    gpu.supersampleLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    gpu.supersampleExtent = target;
+    gpu.supersampleAvailable = false;
+    gpu.supersampleAttempted = true;
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(physical, &properties);
     if (gpu.supersampleExtent.width > properties.limits.maxImageDimension2D ||
@@ -487,7 +504,7 @@ bool ensureSupersample2x(VkPhysicalDevice physical, GpuVideoRenderer& gpu) {
         gpu.supersampleExtent.height > properties.limits.maxFramebufferHeight ||
         gpu.supersampleExtent.width > properties.limits.maxViewportDimensions[0] ||
         gpu.supersampleExtent.height > properties.limits.maxViewportDimensions[1]) {
-        logLine("gpu_scaler supersample2x unavailable reason=device_image_limit target=%ux%u limit=%u",
+        logLine("gpu_scaler easu_intermediate unavailable reason=device_image_limit target=%ux%u limit=%u",
                 gpu.supersampleExtent.width, gpu.supersampleExtent.height,
                 properties.limits.maxImageDimension2D);
         return false;
@@ -496,7 +513,7 @@ bool ensureSupersample2x(VkPhysicalDevice physical, GpuVideoRenderer& gpu) {
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
             gpu.supersampleImage, gpu.supersampleMemory, gpu.supersampleView)) {
         cleanupPartial();
-        logLine("gpu_scaler supersample2x unavailable reason=image_allocation target=%ux%u",
+        logLine("gpu_scaler easu_intermediate unavailable reason=image_allocation target=%ux%u",
                 gpu.supersampleExtent.width, gpu.supersampleExtent.height);
         return false;
     }
@@ -509,7 +526,7 @@ bool ensureSupersample2x(VkPhysicalDevice physical, GpuVideoRenderer& gpu) {
     framebufferInfo.layers = 1;
     if (vkCreateFramebuffer(gpu.device, &framebufferInfo, nullptr, &gpu.supersampleFramebuffer) != VK_SUCCESS) {
         cleanupPartial();
-        logLine("gpu_scaler supersample2x unavailable reason=framebuffer target=%ux%u",
+        logLine("gpu_scaler easu_intermediate unavailable reason=framebuffer target=%ux%u",
                 gpu.supersampleExtent.width, gpu.supersampleExtent.height);
         return false;
     }
@@ -517,9 +534,9 @@ bool ensureSupersample2x(VkPhysicalDevice physical, GpuVideoRenderer& gpu) {
     setInfo.descriptorPool = gpu.descriptorPool;
     setInfo.descriptorSetCount = 1;
     setInfo.pSetLayouts = &gpu.descriptorLayout;
-    if (vkAllocateDescriptorSets(gpu.device, &setInfo, &gpu.supersampleRcasSet) != VK_SUCCESS) {
+    if (!gpu.supersampleRcasSet && vkAllocateDescriptorSets(gpu.device, &setInfo, &gpu.supersampleRcasSet) != VK_SUCCESS) {
         cleanupPartial();
-        logLine("gpu_scaler supersample2x unavailable reason=descriptor_set");
+        logLine("gpu_scaler easu_intermediate unavailable reason=descriptor_set");
         return false;
     }
     VkDescriptorImageInfo images[3] = {
@@ -539,7 +556,7 @@ bool ensureSupersample2x(VkPhysicalDevice physical, GpuVideoRenderer& gpu) {
     gpu.supersampleAvailable = true;
     const uint64_t estimatedBytes = static_cast<uint64_t>(gpu.supersampleExtent.width) *
                                     gpu.supersampleExtent.height * 4;
-    logLine("gpu_scaler supersample2x ready target=%ux%u output=%ux%u estimated_image_bytes=%llu format_bytes_per_pixel=4",
+    logLine("gpu_scaler easu_intermediate ready target=%ux%u output=%ux%u estimated_image_bytes=%llu format_bytes_per_pixel=4",
             gpu.supersampleExtent.width, gpu.supersampleExtent.height,
             gpu.extent.width, gpu.extent.height,
             static_cast<unsigned long long>(estimatedBytes));
@@ -711,8 +728,9 @@ PresentationHeartbeat presentationHeartbeat() {
             swapImageCount);
 
     const VkDeviceSize byteCount = static_cast<VkDeviceSize>(extent.width) * extent.height * sizeof(uint32_t);
+    const VkDeviceSize uploadCapacity = byteCount * 2;
     VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bufferInfo.size = byteCount;
+    bufferInfo.size = uploadCapacity;
     bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     VkBuffer upload = VK_NULL_HANDLE;
@@ -730,8 +748,9 @@ PresentationHeartbeat presentationHeartbeat() {
     must(vkAllocateMemory(device, &allocateInfo, nullptr, &uploadMemory), "vkAllocateMemory(upload)");
     must(vkBindBufferMemory(device, upload, uploadMemory, 0), "vkBindBufferMemory(upload)");
     void* mapped = nullptr;
-    must(vkMapMemory(device, uploadMemory, 0, byteCount, 0, &mapped), "vkMapMemory(upload)");
+    must(vkMapMemory(device, uploadMemory, 0, uploadCapacity, 0, &mapped), "vkMapMemory(upload)");
     makeCanvasPixels(rgba, canvasWidth, canvasHeight, extent.width, extent.height, static_cast<uint32_t*>(mapped));
+    std::memset(static_cast<uint8_t*>(mapped) + byteCount, 0, static_cast<size_t>(byteCount));
     if (!(memoryFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
         VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
         range.memory = uploadMemory;
@@ -772,6 +791,7 @@ PresentationHeartbeat presentationHeartbeat() {
     must(vkCreateFence(device, &fenceInfo, nullptr, &frameFence), "vkCreateFence(frame)");
     bool overlayNeedsInitialUpload = gpuVideoEnabled;
     bool gpuOverlayInitialized = false;
+    bool gpuUiAtlasInitialized = false;
     bool gpuYuvInitialized = false;
     bool gpuVideoHasFrame = false;
     uint32_t lastVideoWidth = 0, lastVideoHeight = 0;
@@ -806,6 +826,7 @@ PresentationHeartbeat presentationHeartbeat() {
     uint64_t previousWindowUniqueFrames = 0;
     int32_t watchedHandle = -1;
     bool wasGpuUi = false;
+    bool wasGpuUiShapes = false;
     uint64_t atlasGeneration = 0;
     bool flipBaselineValid = false;
     int32_t flipBaselineHandle = -1;
@@ -857,9 +878,13 @@ PresentationHeartbeat presentationHeartbeat() {
         }
         const auto* uiCanvas = updateResult.gpuUi;
         const bool useGpuUi = gpuVideoEnabled && uiCanvas && uiCanvas->gpuUiEnabled();
+        const bool gpuUiShapes = useGpuUi && uiCanvas->gpuUiShapesEnabled();
         const bool atlasChanged = useGpuUi && (uiCanvas->gpuAtlasGeneration() != atlasGeneration || !wasGpuUi);
-        const bool overlayChanged = useGpuUi ? atlasChanged : (updateResult.canvasChanged || wasGpuUi);
+        // GPU primitives are layered over the raster fallback. Refresh that
+        // backing image only when the callback reports a changed canvas.
+        const bool overlayChanged = updateResult.canvasChanged || (wasGpuUiShapes && !gpuUiShapes);
         wasGpuUi = useGpuUi;
+        wasGpuUiShapes = gpuUiShapes;
         const uint64_t updateUs = elapsedUs(updateStart);
         updateSumUs += updateUs;
         maxInto(updateUs, updateMaxUs);
@@ -898,13 +923,20 @@ PresentationHeartbeat presentationHeartbeat() {
         updateResult.newVideoFrame = uploadedVideoFrame || (!gpuVideoEnabled && updateResult.newVideoFrame);
         if (updateResult.newVideoFrame) ++windowNewVideoFrames;
         uint64_t uploadUs = 0;
-        if (overlayChanged || overlayNeedsInitialUpload) {
+        if (overlayChanged || overlayNeedsInitialUpload || atlasChanged) {
             const auto uploadStart = Clock::now();
-            const uint32_t* overlay = useGpuUi ? uiCanvas->gpuAtlas() : rgba;
-            if (overlay) makeCanvasPixels(overlay, canvasWidth, canvasHeight, extent.width, extent.height,
-                                          static_cast<uint32_t*>(mapped));
-            else std::memset(mapped, 0, static_cast<size_t>(byteCount));
-            if (useGpuUi) atlasGeneration = uiCanvas->gpuAtlasGeneration();
+            if (overlayChanged || overlayNeedsInitialUpload) {
+                makeCanvasPixels(rgba, canvasWidth, canvasHeight, extent.width, extent.height,
+                                 static_cast<uint32_t*>(mapped));
+                overlayNeedsInitialUpload = false;
+            }
+            if (atlasChanged) {
+                const uint32_t* atlas = uiCanvas->gpuAtlas();
+                if (atlas) makeCanvasPixels(atlas, canvasWidth, canvasHeight, extent.width, extent.height,
+                                            reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(mapped) + byteCount));
+                else std::memset(static_cast<uint8_t*>(mapped) + byteCount, 0, static_cast<size_t>(byteCount));
+                atlasGeneration = uiCanvas->gpuAtlasGeneration();
+            }
             if (!(memoryFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
                 VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
                 range.memory = uploadMemory;
@@ -915,7 +947,6 @@ PresentationHeartbeat presentationHeartbeat() {
             uploadUs = elapsedUs(uploadStart);
             uploadSumUs += uploadUs;
             maxInto(uploadUs, uploadMaxUs);
-            overlayNeedsInitialUpload = false;
         }
         uint32_t imageIndex = 0;
         const auto acquireStart = Clock::now();
@@ -1007,15 +1038,41 @@ PresentationHeartbeat presentationHeartbeat() {
                 gpuVideo.overlayLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                 gpuOverlayInitialized = true;
             }
+            if (atlasChanged || !gpuUiAtlasInitialized) {
+                const auto oldLayout = gpuVideo.uiAtlasLayout;
+                const VkPipelineStageFlags oldStage = gpuUiAtlasInitialized
+                    ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+                const VkAccessFlags oldAccess = gpuUiAtlasInitialized ? VK_ACCESS_SHADER_READ_BIT : 0;
+                transitionImage(command, gpuVideo.uiAtlasImage, oldLayout,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, oldStage,
+                                VK_PIPELINE_STAGE_TRANSFER_BIT, oldAccess, VK_ACCESS_TRANSFER_WRITE_BIT);
+                VkBufferImageCopy atlasCopy{};
+                atlasCopy.bufferOffset = byteCount;
+                atlasCopy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                atlasCopy.imageExtent = {extent.width, extent.height, 1};
+                vkCmdCopyBufferToImage(command, upload, gpuVideo.uiAtlasImage,
+                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &atlasCopy);
+                transitionImage(command, gpuVideo.uiAtlasImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                VK_ACCESS_SHADER_READ_BIT);
+                gpuVideo.uiAtlasLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                gpuUiAtlasInitialized = true;
+            }
 
-            // 2x creates a 4K intermediate for 1080p output. Never allocate or
-            // run it for a 720p (or other non-1080p) source.
+            // User choices are absolute EASU target resolutions, independent of RTP source tier.
+            // The display remains unchanged; larger intermediates are resolved back to it.
             const bool sourceIs1080p = lastVideoWidth == 1920 && lastVideoHeight == 1080;
             const bool outputIs1080p = extent.width == 1920 && extent.height == 1080;
-            const bool requestedSupersample2x = updateResult.fsrScaleFactor == 2 &&
-                updateResult.upscaler == 1 && updateResult.requested1080p && sourceIs1080p && outputIs1080p;
-            const bool supersample2x = gpuVideoEnabled && gpuVideoHasFrame && updateResult.videoActive && requestedSupersample2x &&
-                ensureSupersample2x(physical, gpuVideo);
+            const uint32_t targetHeight = updateResult.fsrTargetHeight == 1440 || updateResult.fsrTargetHeight == 2160
+                ? updateResult.fsrTargetHeight : 1080;
+            const VkExtent2D requestedTarget{targetHeight * 16 / 9, targetHeight};
+            const bool requestedIntermediate = updateResult.upscaler == 1 &&
+                requestedTarget.width > extent.width && requestedTarget.height > extent.height &&
+                requestedTarget.width >= static_cast<uint32_t>(lastVideoWidth) &&
+                requestedTarget.height >= static_cast<uint32_t>(lastVideoHeight);
+            const bool supersample2x = gpuVideoEnabled && gpuVideoHasFrame && updateResult.videoActive && requestedIntermediate &&
+                ensureEasuTarget(physical, gpuVideo, requestedTarget);
             const bool strictUpscale = gpuVideoHasFrame && extent.width >= lastVideoWidth &&
                 extent.height >= lastVideoHeight &&
                 (extent.width > lastVideoWidth || extent.height > lastVideoHeight);
@@ -1057,7 +1114,7 @@ PresentationHeartbeat presentationHeartbeat() {
             vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, gpuVideo.pipelineLayout,
                                     0, 1, &gpuVideo.descriptorSet, 0, nullptr);
             struct VideoPushConstants { float rect[4]; int32_t width, height, enabled, gpuUi; int32_t targetWidth, targetHeight, upscaler, padding; } params{};
-            params.gpuUi = (useGpuUi || doRcas) ? 1 : 0;
+            params.gpuUi = ((gpuUiShapes && updateResult.videoActive) || doRcas) ? 1 : 0;
             const uint32_t matrixCode = static_cast<uint32_t>(activeVideoColor.matrix) & 3u;
             const uint32_t colorFlags = matrixCode | (activeVideoColor.fullRange ? 4u : 0u);
             params.padding = static_cast<int32_t>(std::min(updateResult.rcasSharpness,4u) |
@@ -1104,22 +1161,23 @@ PresentationHeartbeat presentationHeartbeat() {
             const bool easuActive = params.enabled && params.upscaler == 1 &&
                 (strictUpscale || supersample2x);
             const int scalerState[10] = {params.enabled, params.upscaler, params.width, params.height,
-                outputWidth, outputHeight, params.padding, static_cast<int>(updateResult.fsrScaleFactor),
+                outputWidth, outputHeight, params.padding, static_cast<int>(updateResult.fsrTargetHeight),
                 supersample2x ? 1 : 0, updateResult.requested1080p ? 1 : 0};
             bool scalerChanged = false;
             for (int i=0; i<10; ++i) if (previousScaler[i] != scalerState[i]) scalerChanged = true;
             if (scalerChanged) {
                 for (int i=0; i<10; ++i) previousScaler[i] = scalerState[i];
-                logLine("gpu_scaler selected=%s effective=%s source=%dx%d easu_target=%ux%u output=%dx%d requested_scale_factor=%ux requested_tier_1080p=%u supersample_active=%u video_enabled=%d easu_active=%u native_rcas_1080_enabled=%u source_is_1080p=%u rcas_active=%u rcas_level=%u rcas_stops=%.1f resolve=box2x2 denoise=on shader=rgb_active_bounds",
+                logLine("gpu_scaler selected=%s effective=%s source=%dx%d easu_target=%ux%u output=%dx%d requested_easu_height=%u requested_tier_1080p=%u supersample_active=%u video_enabled=%d easu_active=%u native_rcas_1080_enabled=%u source_is_1080p=%u rcas_active=%u rcas_level=%u rcas_sharpness_pct=%u rcas_stops=%.1f resolve=four_tap_linear denoise=on shader=rgb_active_bounds",
                     updateResult.upscaler == 2 ? "native-1to1" : updateResult.upscaler == 1 ? "fsr1-easu-rcas" : "bilinear",
                     !params.enabled ? "inactive" : updateResult.upscaler == 2 ? "native-1to1-no-scaling" :
-                        supersample2x ? "fsr1-easu-2x+rcas-downsample" :
+                        supersample2x ? "fsr1-easu-target+rcas-downsample" :
                         doRcas ? (easuActive ? "fsr1-easu-rgb+rcas" : "native-rgb+rcas") : "bilinear",
                     params.width, params.height, params.targetWidth, params.targetHeight,
-                    outputWidth, outputHeight, updateResult.fsrScaleFactor, updateResult.requested1080p ? 1u : 0u,
+                    outputWidth, outputHeight, updateResult.fsrTargetHeight, updateResult.requested1080p ? 1u : 0u,
                     supersample2x ? 1u : 0u, params.enabled, easuActive ? 1u : 0u,
                     nativeRcas1080p ? 1u : 0u, sourceIs1080p ? 1u : 0u, doRcas ? 1u : 0u,
                     static_cast<unsigned>(params.padding) & 7u,
+                    (4u - (static_cast<unsigned>(params.padding) & 7u)) * 25u,
                     (static_cast<unsigned>(params.padding) & 7u) * 0.5);
             }
             static int previousColorFlags = -1;
@@ -1161,7 +1219,7 @@ PresentationHeartbeat presentationHeartbeat() {
                 VkDescriptorSet rcasSet = supersample2x ? gpuVideo.supersampleRcasSet : gpuVideo.rcasSet;
                 vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, gpuVideo.pipelineLayout,
                     0, 1, &rcasSet, 0, nullptr);
-                params.gpuUi = useGpuUi ? 1 : 0;
+                params.gpuUi = (gpuUiShapes && updateResult.videoActive) ? 1 : 0;
                 params.targetWidth = extent.width;
                 params.targetHeight = extent.height;
                 vkCmdPushConstants(command, gpuVideo.pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(params), &params);
@@ -1170,7 +1228,7 @@ PresentationHeartbeat presentationHeartbeat() {
             if (useGpuUi) {
                 vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, gpuVideo.uiPipeline);
                 vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, gpuVideo.uiLayout,
-                                        0, 1, &gpuVideo.descriptorSet, 0, nullptr);
+                                        0, 1, &gpuVideo.uiDescriptorSet, 0, nullptr);
                 for (const auto& draw : uiCanvas->gpuCommands()) {
                     const int left = std::max(0, draw.clip.x), top = std::max(0, draw.clip.y);
                     const int right = std::min(static_cast<int>(extent.width), draw.clip.x + draw.clip.w);
@@ -1355,9 +1413,10 @@ PresentationHeartbeat presentationHeartbeat() {
                     static_cast<unsigned long long>(presentationStats.confirmedUniqueVideoFrames),
                     static_cast<unsigned long long>(presentationStats.confirmedRepeatedVideoFlips));
             ++presentationStats.generation;
-            if (useGpuUi) logLine("gpu_ui quads=%zu atlas_generation=%llu atlas_overflow=%u target_fps=%u raster=GPU",
+            if (useGpuUi) logLine("gpu_ui quads=%zu atlas_generation=%llu atlas_overflow=%u target_fps=%u mode=%s glyph_blend=GPU",
                     uiCanvas->gpuCommands().size(), static_cast<unsigned long long>(atlasGeneration),
-                    uiCanvas->gpuAtlasOverflow() ? 1u : 0u, targetFps);
+                    uiCanvas->gpuAtlasOverflow() ? 1u : 0u, targetFps,
+                    gpuUiShapes ? "shapes+text" : "text");
             logLine("present_rate window_ms=%u frames=%llu present_loop_fps=%u uploaded_video_fps=%u confirmed_unique_video_fps=%u frame_interval_ms=%.3f/%.3f",
                     elapsedMs, static_cast<unsigned long long>(windowFrames), presentationStats.presentFps,
                     presentationStats.newVideoFps, presentationStats.confirmedUniqueVideoFps,

@@ -48,6 +48,9 @@ bool decodeImage(const std::string& bytes, Image& out) {
     out.px.resize(static_cast<size_t>(w) * h);
     std::memcpy(out.px.data(), data, out.px.size() * 4);
     stbi_image_free(data);
+    out.opaque = std::all_of(out.px.begin(), out.px.end(), [](uint32_t pixel) {
+        return alphaOf(pixel) == 255;
+    });
     return true;
 }
 
@@ -58,6 +61,7 @@ Image coverResize(const Image& src, int w, int h) {
         src.px.size() < static_cast<size_t>(src.w) * static_cast<size_t>(src.h)) return out;
     out.w = w;
     out.h = h;
+    out.opaque = src.opaque;
     out.px.resize(static_cast<size_t>(w) * h);
     // Crop the source to the target aspect ratio, centred.
     double scale = std::max(static_cast<double>(w) / src.w, static_cast<double>(h) / src.h);
@@ -125,21 +129,31 @@ ImageCache::ImageCache(std::function<void()> onReady, size_t budgetBytes, std::s
         if (ready && ::chmod(diskDir_.c_str(), 0777) != 0) {
             XC_LOGW("image cache directory chmod failed errno=%d", errno);
         }
-        if (ready && ::access(diskDir_.c_str(), W_OK | R_OK | X_OK) != 0) {
-            XC_LOGW("image cache disk unavailable: directory not accessible errno=%d", errno);
-            ready = false;
-        }
         if (ready) {
             const std::string probe = diskDir_ + "/.psbox-cache-probe";
             FILE* f = std::fopen(probe.c_str(), "wb");
             bool probeOk = f != nullptr;
+            int probeError = probeOk ? 0 : errno;
             if (f) {
                 probeOk = std::fwrite("ok", 1, 2, f) == 2;
                 if (std::fclose(f) != 0) probeOk = false;
+                if (!probeOk) probeError = errno ? errno : EIO;
+            }
+            if (probeOk) {
+                f = std::fopen(probe.c_str(), "rb");
+                probeOk = f != nullptr;
+                if (!probeOk) probeError = errno;
+                if (f) {
+                    char contents[2]{};
+                    probeOk = std::fread(contents, 1, sizeof(contents), f) == sizeof(contents) &&
+                              contents[0] == 'o' && contents[1] == 'k';
+                    if (std::fclose(f) != 0) probeOk = false;
+                    if (!probeOk) probeError = errno ? errno : EIO;
+                }
             }
             if (!probeOk) {
                 ::unlink(probe.c_str());
-                XC_LOGW("image cache disk unavailable: write probe failed errno=%d", errno);
+                XC_LOGW("image cache disk unavailable: read_write_probe_failed errno=%d", probeError);
                 ready = false;
             } else {
                 ::unlink(probe.c_str());

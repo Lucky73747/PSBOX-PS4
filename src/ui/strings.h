@@ -218,6 +218,9 @@ enum class Str {
     MenuAudioOutput,    // "Audio output"
     AudioRouteTv,       // "TV"
     AudioRoutePad,      // "DualSense Speaker"
+    CloudCatalog,
+    OwnedGames,
+    OwnedGamesHint,
     Count
 };
 

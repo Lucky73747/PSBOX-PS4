@@ -227,13 +227,36 @@ std::string prettyRegion(const std::string& name) {
     return out;
 }
 
-bool AppUi::Anim::step(float dt) {
+bool AppUi::Anim::step(float dt, float maxStep) {
     float d = target - value;
     if (std::fabs(d) < 0.5f) {
         value = target;
         return false;
     }
-    value += d * std::min(1.0f, dt * 14.0f);
+    value += d * std::clamp(std::min(1.0f, dt * 14.0f), 0.0f, maxStep);
+    return true;
+}
+
+void AppUi::Anim::animateTo(float next, uint64_t nowMs, uint64_t durationMs) {
+    if (std::fabs(target - next) < 0.5f) return;
+    timedFrom = value;
+    target = next;
+    timedStartMs = nowMs;
+    timedDurationMs = std::max<uint64_t>(1, durationMs);
+    timed = true;
+}
+
+bool AppUi::Anim::stepTimed(uint64_t nowMs) {
+    if (!timed) return false;
+    const uint64_t elapsed = nowMs >= timedStartMs ? nowMs - timedStartMs : 0;
+    const float t = std::clamp(static_cast<float>(elapsed) / static_cast<float>(timedDurationMs), 0.0f, 1.0f);
+    const float eased = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);  // cubic out
+    value = timedFrom + (target - timedFrom) * eased;
+    if (t >= 1.0f) {
+        value = target;
+        timed = false;
+        return false;
+    }
     return true;
 }
 
@@ -320,18 +343,47 @@ void AppUi::setOwned(std::vector<GameTile> owned, std::vector<GameTile> purchasa
 }
 
 void AppUi::setCloudLibrary(std::vector<GameTile> titles) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Prepare the account subset outside the UI lock; never fetch ownership here.
+    std::vector<GameTile> owned;
+    for (const auto& tile : titles) if (tile.accountOwned) owned.push_back(tile);
     GameRow row;
-    row.title = "PSBOX";
+    row.title = tr(Str::CloudCatalog);
     row.tiles = titles;
     row.gamePassBadges = false;
+    row.isGrid = true;
+    std::lock_guard<std::mutex> lock(mutex_);
+    cloudLibraryMode_ = true;
     allRows_ = {std::move(row)};
-    allOwned_ = titles;
+    allOwned_ = std::move(owned);
     allPurchasable_.clear();
-    gamePassPool_ = titles;
-    libraryPool_ = std::move(titles);
+    gamePassPool_ = std::move(titles);
+    libraryPool_ = allOwned_;
+    // Refresh cached recent entries as catalog metadata arrives, without
+    // changing their launch order or adding games that were not launched.
+    for (auto& recent : recentGames_) {
+        for (const auto& title : gamePassPool_) {
+            const bool same = !recent.productId.empty() ? recent.productId == title.productId
+                                                        : recent.titleId == title.titleId;
+            if (same) { recent = title; break; }
+        }
+    }
     ownedKnown_ = true;
     rebuild(true);
+}
+
+void AppUi::recordRecentGame(const GameTile& game) {
+    if (game.homeConsole || (game.productId.empty() && game.titleId.empty() && game.name.empty())) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto sameGame = [&](const GameTile& item) {
+        if (!game.productId.empty() && !item.productId.empty()) return game.productId == item.productId;
+        if (!game.titleId.empty() && !item.titleId.empty()) return game.titleId == item.titleId;
+        return !game.name.empty() && game.name == item.name;
+    };
+    recentGames_.erase(std::remove_if(recentGames_.begin(), recentGames_.end(), sameGame), recentGames_.end());
+    recentGames_.insert(recentGames_.begin(), game);
+    constexpr size_t kRecentLimit = 24;
+    if (recentGames_.size() > kRecentLimit) recentGames_.resize(kRecentLimit);
+    dirty_ = true;
 }
 
 namespace {
@@ -664,6 +716,8 @@ std::vector<std::pair<std::string, PriceInfo>> AppUi::searchResults(size_t max) 
 
 std::string AppUi::focusDescription() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (tab_ == Tab::Recent)
+        return "Recent game " + std::to_string(qtLibraryFocus_);
     if (tab_ == Tab::GamePass)
         return "Game Pass row " + std::to_string(focusRow_) + " card " +
                std::to_string(focusCol_.empty() ? 0 : focusCol_[static_cast<size_t>(focusRow_)]);
@@ -681,6 +735,24 @@ void AppUi::showTab(Tab t) {
     std::lock_guard<std::mutex> lock(mutex_);
     tab_ = t;
     searching_ = false;
+    qtLibraryFocus_ = 0;
+    qtLibraryGridFocus_ = false;
+    qtLibraryControlFocus_ = -1;
+    qtLibraryHeroActionFocus_ = 0;
+    gridScroll_ = Anim{};
+    qtLibraryPageScroll_ = Anim{};
+    dirty_ = true;
+}
+
+void AppUi::setQtLibraryUi(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    qtLibraryUi_ = enabled;
+    qtLibraryFocus_ = 0;
+    qtLibraryGridFocus_ = false;
+    qtLibraryControlFocus_ = -1;
+    qtLibraryHeroActionFocus_ = 0;
+    gridScroll_ = Anim{};
+    qtLibraryPageScroll_ = Anim{};
     dirty_ = true;
 }
 
@@ -715,7 +787,7 @@ void AppUi::refreshDetail() {
     };
     for (const auto& row : rows_)
         for (const auto& t : row.tiles) take(t);
-    for (const auto* list : {&owned_, &purchasable_, &gamePassPool_, &libraryPool_})
+    for (const auto* list : {&owned_, &purchasable_, &gamePassPool_, &libraryPool_, &recentGames_})
         for (const auto& t : *list) take(t);
 }
 
@@ -747,7 +819,9 @@ void AppUi::runSearch() {
         const GameTile* tile;
     };
     std::vector<Hit> hits;
-    for (const auto& t : tab_ == Tab::GamePass ? gamePassPool_ : libraryPool_) {
+    const auto& searchPool = tab_ == Tab::GamePass ? gamePassPool_ :
+                             tab_ == Tab::Recent ? recentGames_ : libraryPool_;
+    for (const auto& t : searchPool) {
         if (hidden_.count(t.productId)) continue;
         if (filterConsole_ && t.platform != kConsoleCodes[filterConsole_]) continue;
         // Play mode and language need the full details: a game without them
@@ -1338,6 +1412,24 @@ const AppUi::LibraryLayout& AppUi::libraryLayout() const {
 
 void AppUi::handleHome(const NavInput& in, UiEvent& ev) {
     // Caller holds mutex_.
+    if (qtLibraryUi_ && (in.l1 || in.r1)) {
+        int n = static_cast<int>(tab_) + (in.r1 ? 1 : 3);
+        tab_ = static_cast<Tab>(n % 4);
+        searching_ = false;
+        qtLibraryFocus_ = 0;
+        qtLibraryGridFocus_ = false;
+        qtLibraryControlFocus_ = -1;
+        qtLibraryHeroActionFocus_ = 0;
+        gridScroll_ = Anim{};
+        qtLibraryPageScroll_ = Anim{};
+        if (tab_ == Tab::Consoles) ev.action = Action::ConsolesShown;
+        dirty_ = true;
+        return;
+    }
+    if (qtLibraryUi_ && !searching_) {
+        handleQtLibrary(in, ev);
+        return;
+    }
     if ((in.scrollRows || in.scrollCards) && !(searching_ && searchOnKeys_)) {
         // Smooth scrolling: the rows and cards it moved by since the last
         // pass, one step at a time (the view glides after the focus).
@@ -1359,9 +1451,10 @@ void AppUi::handleHome(const NavInput& in, UiEvent& ev) {
         return;
     }
     if (in.l1 || in.r1) {
-        // Game Pass, Your games, My consoles, round.
+        // Legacy layout has Game Pass, Your games and My consoles.
         int n = static_cast<int>(tab_) + (in.r1 ? 1 : 2);
-        tab_ = static_cast<Tab>(n % 3);
+        const Tab legacyTabs[] = {Tab::GamePass, Tab::Library, Tab::Consoles};
+        tab_ = legacyTabs[n % 3];
         searching_ = false;
         dirty_ = true;
         if (tab_ == Tab::Consoles) ev.action = Action::ConsolesShown;
@@ -1415,6 +1508,13 @@ void AppUi::handleHome(const NavInput& in, UiEvent& ev) {
         return;
     }
     switch (tab_) {
+        case Tab::Recent: {
+            int count = static_cast<int>(recentGames_.size());
+            if (count <= 0) break;
+            if (moveInGrid(qtLibraryFocus_, count, 6, in)) dirty_ = true;
+            if (in.accept) openDetails(recentGames_[static_cast<size_t>(qtLibraryFocus_)]);
+            break;
+        }
         case Tab::Consoles: {
             int n = static_cast<int>(consoles_.size());
             // Search again: Cross with none listed, Triangle otherwise.
@@ -1559,14 +1659,16 @@ std::vector<AppUi::Filter> AppUi::filterRow(int row) const {
     // Caller holds mutex_. Prices only matter in "Your games" (Game Pass
     // games aren't bought).
     if (row == 1) return {Filter::Mode, Filter::Genre, Filter::Publisher, Filter::Language};
-    if (tab_ == Tab::GamePass) return {Filter::Console};
+    if (tab_ == Tab::GamePass || tab_ == Tab::Recent) return {Filter::Console};
     return {Filter::Free, Filter::Cheapest, Filter::Console};
 }
 
 std::vector<std::string> AppUi::poolGenres() const {
     // Caller holds mutex_.
     std::map<std::string, int> count;
-    for (const auto& t : tab_ == Tab::GamePass ? gamePassPool_ : libraryPool_)
+    const auto& genrePool = tab_ == Tab::GamePass ? gamePassPool_ :
+                            tab_ == Tab::Recent ? recentGames_ : libraryPool_;
+    for (const auto& t : genrePool)
         for (const auto& c : t.categories) ++count[c];
     std::vector<std::pair<int, std::string>> order;
     for (const auto& [g, n] : count) order.push_back({-n, g});
@@ -2276,10 +2378,13 @@ void AppUi::drawSignIn(Canvas& c, uint64_t nowMs) {
 
 void AppUi::drawTabs(Canvas& c) {
     // Centred pills in the top bar, between "L1" and "R1".
-    const char* labels[3] = {tr(Str::TabGamePass), tr(Str::YourGames), tr(Str::TabConsoles)};
+    const int tabCount = qtLibraryUi_ ? 4 : 3;
+    const char* labels[4] = {tr(cloudLibraryMode_ ? Str::CloudCatalog : Str::TabGamePass),
+                             tr(cloudLibraryMode_ ? Str::OwnedGames : Str::YourGames),
+                             qtLibraryUi_ ? "Recentes" : tr(Str::TabConsoles), tr(Str::TabConsoles)};
     constexpr int kPx = 22, kPad = 26, kGap = 12, kH = 44, kY = 50;
-    int widths[3], total = 0;
-    for (int i = 0; i < 3; ++i) {
+    int widths[4], total = 0;
+    for (int i = 0; i < tabCount; ++i) {
         widths[i] = fonts_.semibold.measure(labels[i], kPx) + 2 * kPad;
         total += widths[i] + (i ? kGap : 0);
     }
@@ -2290,8 +2395,9 @@ void AppUi::drawTabs(Canvas& c) {
         fonts_.bold.draw(c, name, cx - fonts_.bold.measure(name, 16) / 2, fonts_.bold.centeredY(r.y, r.h, 16), 16, kGray);
     };
     shoulder("L1", x - 40);
-    for (int i = 0; i < 3; ++i) {
-        bool on = static_cast<int>(tab_) == i;
+    for (int i = 0; i < tabCount; ++i) {
+        const Tab shownTab = qtLibraryUi_ ? static_cast<Tab>(i) : (i == 2 ? Tab::Consoles : static_cast<Tab>(i));
+        bool on = tab_ == shownTab;
         Rect r{x, kY, widths[i], kH};
         if (on) c.fillRect(r, kWhite, kH / 2);
         fonts_.semibold.draw(c, labels[i], x + kPad, fonts_.semibold.centeredY(kY, kH, kPx), kPx, on ? kBg : kGray);
@@ -2463,6 +2569,7 @@ void AppUi::drawGrid(Canvas& c, const std::vector<GameTile>& tiles, int x0, int 
 }
 
 void AppUi::drawLibrary(Canvas& c, uint64_t nowMs) {
+    if (qtLibraryUi_) return drawQtLibrary(c, nowMs);
     drawBackground(c);
     constexpr int kGridW = kLibraryCols * kCardPitch - kCardGap;
     const int left = (kW - kGridW) / 2;
@@ -2484,7 +2591,7 @@ void AppUi::drawLibrary(Canvas& c, uint64_t nowMs) {
         fonts_.semibold.draw(c, gamesCount(count), x + w + 20, hy + 20, 22, kDim);
         if (line) fonts_.regular.draw(c, line, x, hy + 52, 22, kGray);
     };
-    if (!owned_.empty()) heading(0, tr(Str::YourGames), owned_.size(), nullptr, false);
+    if (!owned_.empty()) heading(0, tr(cloudLibraryMode_ ? Str::OwnedGames : Str::YourGames), owned_.size(), cloudLibraryMode_ ? tr(Str::OwnedGamesHint) : nullptr, false);
     if (!purchasable_.empty()) heading(1, tr(Str::AvailableToBuy), purchasable_.size(), tr(Str::BuyToPlay), true);
     if (!hiddenTiles_.empty()) heading(2, tr(Str::HiddenSection), hiddenTiles_.size(), tr(Str::HiddenHint), false);
     const int firstVisibleRowY = offset + clipTop - kLibraryTop - kCard - 40;
@@ -2517,6 +2624,7 @@ void AppUi::drawLibrary(Canvas& c, uint64_t nowMs) {
             animating_ = true;
         } else {
             drawCentered(c, fonts_.semibold, tr(Str::NoGames), 500, 30, kGray);
+            if (cloudLibraryMode_) drawCentered(c, fonts_.regular, tr(Str::OwnedGamesHint), 548, 22, kDim);
         }
     }
     {
@@ -2548,6 +2656,486 @@ void AppUi::drawLibrary(Canvas& c, uint64_t nowMs) {
     drawToast(c, nowMs);
 }
 
+// Native C++ port of the standalone Qt/Web catalog concept, using the same
+// square game covers as the original library UI.
+void AppUi::drawQtLibrary(Canvas& c, uint64_t nowMs) {
+    constexpr Color bg = rgba(17, 20, 18), surface = rgba(24, 27, 25);
+    constexpr Color ink = rgba(238, 239, 236), muted = rgba(174, 179, 174);
+    constexpr Color quiet = rgba(128, 134, 127), accent = rgba(168, 196, 207);
+    c.clear(bg);
+    // Header: brand, four text tabs, search and settings, matching the HTML geometry.
+    c.fillRect({0, 86, kW, 1}, rgba(255, 255, 255, 18));
+    fonts_.semibold.draw(c, "PSBOX", 96, 34, 24, ink);
+    const char* tabs[] = {"Catálogo", "Meus jogos", "Recentes", "Consoles"};
+    int tx = 255;
+    for (int i = 0; i < 4; ++i) {
+        const int w = fonts_.regular.measure(tabs[i], 16);
+        const Color col = tab_ == static_cast<Tab>(i) ? ink : muted;
+        fonts_.regular.draw(c, tabs[i], tx, 35, 16, col);
+        if (tab_ == static_cast<Tab>(i)) c.fillRect({tx, 65, w, 2}, accent);
+        tx += w + 42;
+    }
+    c.strokeCircle(1390, 43, 9, 2, muted);
+    c.line(1397, 50, 1405, 58, 2, muted);
+    fonts_.regular.draw(c, "Buscar jogo", 1416, 35, 16, quiet);
+    c.fillRect({1390, 61, 215, 1}, rgba(255, 255, 255, 43));
+    fonts_.regular.draw(c, "Configurações", 1684, 35, 16, muted);
+
+    const int pageOffset = static_cast<int>(std::lround(qtLibraryPageScroll_.value));
+    // Switch modes only after the hero and shelf heading have naturally
+    // scrolled past the sticky header; an earlier cutoff made a single press
+    // appear to snap midway through the transition.
+    const bool compactGrid = pageOffset >= 600;
+    c.setClip({0, 87, kW, kH - 87});
+    // Covers come from the persistent ImageCache. Cache misses enqueue
+    // background work and leave the square placeholder visible without
+    // blocking input.
+    constexpr int heroY = 87, heroH = 518;
+    // Scroll the hero and shelf together under the sticky header.
+    if (!compactGrid) c.gradientV({0, heroY - pageOffset, kW, heroH}, rgba(29, 34, 30), bg);
+    const std::vector<GameTile>* sourceTiles = tab_ == Tab::Library ? &owned_ :
+                                               tab_ == Tab::Recent ? &recentGames_ : &gamePassPool_;
+    int visibleTileCount = 0;
+    for (const auto& tile : *sourceTiles) if (!hidden_.count(tile.productId)) ++visibleTileCount;
+    const int selected = std::clamp(qtLibraryFocus_, 0, std::max(0, visibleTileCount - 1));
+    const GameTile* selectedTile = nullptr;
+    int selectedIndex = 0;
+    for (const auto& tile : *sourceTiles) {
+        if (hidden_.count(tile.productId)) continue;
+        if (selectedIndex++ == selected) { selectedTile = &tile; break; }
+    }
+    const int columns = qtLibraryColumns_;
+    const int cardSize = columns == 6 ? 248 : 360;
+    // Request the newly focused cover immediately, even if a fast scroll has
+    // moved focus beyond the currently drawn rows. This keeps the preview in
+    // step with navigation instead of waiting for the row to enter view.
+    // Use one cache key for the selected preview and its grid tile. Requesting
+    // separate 240px and grid-sized variants caused duplicate downloads and
+    // left the selected art behind the visible grid in the worker queue.
+    std::shared_ptr<const Image> selectedCover;
+    if (selectedTile && !selectedTile->tileUrl.empty())
+        selectedCover = images_.get(selectedTile->tileUrl, cardSize, cardSize, ImagePriority::Focused);
+    if (!compactGrid) {
+        if (selectedTile) {
+            const int heroArtX = 96;
+            if (selectedCover)
+                c.drawImage(*selectedCover, heroArtX, 174 - pageOffset, 255, 10);
+            else
+                c.fillRect({heroArtX, 174 - pageOffset, cardSize, cardSize}, surface, 10);
+        }
+        if (selectedTile) {
+            const int heroTextX = 96 + cardSize + 48;
+            fonts_.bold.draw(c, fonts_.bold.fit(selectedTile->name, 60, 1824 - heroTextX), heroTextX, 367 - pageOffset, 60, ink);
+            const int btnY = 505 - pageOffset;
+            c.fillRect({heroTextX, btnY, 142, 48}, qtLibraryHeroActionFocus_ == 0 ? accent : surface, 4);
+            c.strokeRect({heroTextX, btnY, 142, 48}, qtLibraryHeroActionFocus_ == 0 ? accent : rgba(255,255,255,45), 1, 4);
+            const int playWidth = fonts_.semibold.measure("Jogar", 20);
+            fonts_.semibold.draw(c, "Jogar", heroTextX + (142 - playWidth) / 2, btnY + 13, 20,
+                                 qtLibraryHeroActionFocus_ == 0 ? rgba(23, 33, 38) : muted);
+            c.strokeRect({heroTextX + 160, btnY, 126, 48}, qtLibraryHeroActionFocus_ == 1 ? accent : rgba(255,255,255,45), 1, 4);
+            const int detailsWidth = fonts_.semibold.measure("Detalhes", 20);
+            fonts_.semibold.draw(c, "Detalhes", heroTextX + 160 + (126 - detailsWidth) / 2, btnY + 13, 20,
+                                 qtLibraryHeroActionFocus_ == 1 ? ink : muted);
+            const std::string& subtitle = !selectedTile->publisher.empty() ? selectedTile->publisher :
+                                          !selectedTile->categories.empty() ? selectedTile->categories.front() :
+                                          selectedTile->platform;
+            if (!subtitle.empty())
+                fonts_.regular.draw(c, fonts_.regular.fit(subtitle, 18, 1824 - heroTextX), heroTextX, 445 - pageOffset, 18, muted);
+            fonts_.regular.draw(c, "Meus jogos", heroTextX + 310, btnY + 14, 18, muted);
+        } else {
+            const char* emptyMessage = tab_ == Tab::Recent ? "Nenhum jogo iniciado nesta sessão"
+                                                           : "Nenhum jogo encontrado";
+            fonts_.semibold.draw(c, emptyMessage, 96, 402 - pageOffset, 26, muted);
+        }
+    }
+
+    // Shelf heading and controls, scaled from the reference's 6-column desktop layout.
+    if (!compactGrid) {
+        const int shelfHeaderY = 640 - pageOffset;
+        fonts_.semibold.draw(c, tab_ == Tab::Library ? "Meus jogos" :
+                                tab_ == Tab::Recent ? "Recentes" : "Todos os jogos",
+                             96, shelfHeaderY, 28, ink);
+        fonts_.regular.draw(c, "Selecione um jogo para ver detalhes ou iniciar.", 96, 676 - pageOffset, 16, muted);
+        int right = 1824;
+        auto control = [&](const char* label, int width, int index) {
+            const bool focus = qtLibraryControlFocus_ == index;
+            right -= width;
+            const int controlY = 650 - pageOffset;
+            c.fillRect({right, controlY, width, 34}, focus ? rgba(168, 196, 207, 50) : surface, 4);
+            c.strokeRect({right, controlY, width, 34}, focus ? accent : rgba(255,255,255,35), 1, 4);
+            int tw = fonts_.regular.measure(label, 15);
+            fonts_.regular.draw(c, label, right + (width - tw) / 2, 659 - pageOffset, 15, focus ? ink : muted);
+            right -= 10;
+        };
+        control(qtLibrarySortAZ_ ? "Z-A" : "A-Z", 58, 2);
+        control(qtLibraryColumns_ == 6 ? "6 por linha" : "4 por linha", 112, 1);
+        control("Filtrar", 80, 0);
+        fonts_.regular.draw(c, gamesCount(static_cast<size_t>(visibleTileCount)), 1300, 659 - pageOffset, 15, muted);
+    }
+
+    // Only the visible rows request art, with the focused tile promoted ahead
+    // of other visible cards. The cache performs download/decode off-thread.
+    const int cardW = cardSize;
+    const int cardH = cardSize;
+    constexpr int gap = 25, x0 = 96;
+    constexpr int y = 728;
+    const int rowPitch = cardH + 70;
+    const int offset = static_cast<int>(std::lround(gridScroll_.value));
+    const size_t firstRow = static_cast<size_t>(std::max(0, offset / rowPitch - 1)) * static_cast<size_t>(columns);
+    // Keep enough rows beyond the overscan row so the next focused row is
+    // already drawable as scrolling brings it into the viewport.
+    const size_t cardEnd = std::min(static_cast<size_t>(visibleTileCount), firstRow + static_cast<size_t>(columns * 5));
+    size_t i = 0;
+    for (const auto& tile : *sourceTiles) {
+        if (hidden_.count(tile.productId)) continue;
+        if (i >= cardEnd) break;
+        const size_t cardIndex = i++;
+        if (cardIndex < firstRow) continue;
+        const int col = static_cast<int>(cardIndex % static_cast<size_t>(columns));
+        const int row = static_cast<int>(cardIndex / static_cast<size_t>(columns));
+        const int x = x0 + col * (cardW + gap), cy = y + row * rowPitch - offset - pageOffset;
+        if (cy + cardH + 42 < 87 || cy > 1010) continue;
+        const bool focused = qtLibraryGridFocus_ && static_cast<int>(cardIndex) == selected;
+        const bool hasArt = !tile.tileUrl.empty();
+        if (!hasArt) c.fillRect({x, cy, cardW, cardH}, focused ? rgba(47, 56, 51) : rgba(34, 38, 35), 4);
+        if (hasArt) {
+            const auto priority = focused ? ImagePriority::Focused : ImagePriority::Visible;
+            auto art = &tile == selectedTile && selectedCover
+                ? selectedCover : images_.get(tile.tileUrl, cardW, cardH, priority);
+            if (art)
+                c.drawImage(*art, x, cy, 255, 4);
+            else
+                c.fillRect({x, cy, cardW, cardH}, focused ? rgba(47, 56, 51) : rgba(34, 38, 35), 4);
+        }
+        c.strokeRect({x, cy, cardW, cardH}, focused ? accent : rgba(255,255,255,32), focused ? 2 : 1, 4);
+        if (focused) {
+            // Keep the current game's preview attached to its square cover;
+            // it changes with focus and never occupies a separate fixed pane.
+            constexpr int infoH = 66;
+            c.fillRect({x + 4, cy + cardH - infoH - 4, cardW - 8, infoH}, rgba(10, 12, 11, 224), 4);
+            fonts_.semibold.draw(c, fonts_.semibold.fit(tile.name, 17, cardW - 24), x + 12,
+                                 cy + cardH - infoH + 7, 17, ink);
+            const std::string& preview = !tile.publisher.empty() ? tile.publisher :
+                                         !tile.categories.empty() ? tile.categories.front() : tile.platform;
+            if (!preview.empty())
+                fonts_.regular.draw(c, fonts_.regular.fit(preview, 13, cardW - 24), x + 12,
+                                    cy + cardH - 28, 13, muted);
+        } else {
+            fonts_.semibold.draw(c, fonts_.semibold.fit(tile.name, 18, cardW), x, cy + cardH + 17, 18, muted);
+        }
+    }
+    c.resetClip();
+    // Remaining space mirrors the airy prototype and carries no extra cards.
+    c.gradientV({0, 972, kW, 108}, rgba(17,20,18,0), bg);
+    c.fillRect({0, 1035, kW, 45}, bg);
+    if (compactGrid || qtLibraryGridFocus_) {
+        drawHints(c, {{kIconCross, tr(Str::Select)},
+                      {kIconSquare, tr(selectedTile && hidden_.count(selectedTile->productId)
+                                           ? Str::Unhide : Str::Hide)},
+                      {kIconTriangle, tr(Str::TabSearch)},
+                      {kIconOptions, tr(Str::Settings)}});
+    } else if (qtLibraryControlFocus_ >= 0) {
+        drawHints(c, {{kIconCross, tr(Str::Select)},
+                      {kIconOptions, tr(Str::Settings)}});
+    } else {
+        drawHints(c, {{kIconCross, tr(Str::Select)},
+                      {kIconTriangle, tr(Str::TabSearch)},
+                      {kIconOptions, tr(Str::Settings)},
+                      {kIconTouchpad, tr(Str::HoldSignOut)}});
+    }
+    drawToast(c, nowMs);
+}
+
+void AppUi::drawQtConsoles(Canvas& c, uint64_t nowMs) {
+    constexpr Color bg = rgba(17, 20, 18), surface = rgba(24, 27, 25);
+    constexpr Color ink = rgba(238, 239, 236), muted = rgba(174, 179, 174);
+    constexpr Color quiet = rgba(128, 134, 127), accent = rgba(168, 196, 207);
+    c.clear(bg);
+    c.fillRect({0, 86, kW, 1}, rgba(255, 255, 255, 18));
+    fonts_.semibold.draw(c, "PSBOX", 96, 34, 24, ink);
+    const char* tabs[] = {"Catálogo", "Meus jogos", "Recentes", "Consoles"};
+    int tx = 255;
+    for (int i = 0; i < 4; ++i) {
+        const int w = fonts_.regular.measure(tabs[i], 16);
+        const Color col = i == static_cast<int>(Tab::Consoles) ? ink : muted;
+        fonts_.regular.draw(c, tabs[i], tx, 35, 16, col);
+        if (i == static_cast<int>(Tab::Consoles)) c.fillRect({tx, 65, w, 2}, accent);
+        tx += w + 42;
+    }
+    c.strokeCircle(1390, 43, 9, 2, muted);
+    c.line(1397, 50, 1405, 58, 2, muted);
+    fonts_.regular.draw(c, "Atualizar consoles", 1416, 35, 16, quiet);
+    c.fillRect({1390, 61, 215, 1}, rgba(255, 255, 255, 43));
+    fonts_.regular.draw(c, "Configurações", 1684, 35, 16, muted);
+
+    fonts_.semibold.draw(c, "Meus consoles", 96, 132, 34, ink);
+    fonts_.regular.draw(c, "Consoles vinculados à sua conta para Remote Play.", 96, 177, 18, muted);
+    if (consoles_.empty()) {
+        c.fillRect({96, 235, 1728, 565}, surface, 12);
+        c.strokeRect({96, 235, 1728, 565}, rgba(255, 255, 255, 28), 1, 12);
+        if (!consolesKnown_) {
+            drawSpinner(c, kW / 2.0f, 454, 30, nowMs);
+            fonts_.semibold.draw(c, "Procurando consoles...", 96, 527, 28, muted);
+            fonts_.regular.draw(c, "A lista será atualizada assim que a busca terminar.", 96, 570, 18, quiet);
+            animating_ = true;
+        } else {
+            fonts_.semibold.draw(c, "Nenhum console encontrado", 144, 328, 32, ink);
+            fonts_.regular.draw(c, "Ative o Remote Play e entre com a mesma conta no console.",
+                                144, 382, 20, muted);
+            fonts_.regular.draw(c, "Depois, escolha Atualizar consoles para buscar novamente.",
+                                144, 418, 20, muted);
+            Rect help = drawQr(c, "https://support.xbox.com/help/games-apps/game-setup-and-play/how-to-use-remote-play",
+                               1680, 315, 220);
+            if (help.w > 0) {
+                const char* label = "Guia de configuração";
+                const int w = fonts_.regular.measure(label, 16);
+                fonts_.regular.draw(c, label, help.x + (help.w - w) / 2, help.y + help.h + 12, 16, muted);
+            }
+        }
+        drawHints(c, {{kIconCross, tr(Str::SearchAgain)},
+                      {kIconTriangle, tr(Str::SearchAgain)},
+                      {kIconOptions, tr(Str::Settings)},
+                      {kIconTouchpad, tr(Str::HoldSignOut)}});
+        drawToast(c, nowMs);
+        return;
+    }
+
+    const int selected = std::clamp(consoleFocus_, 0, static_cast<int>(consoles_.size()) - 1);
+    const ConsoleTile& current = consoles_[static_cast<size_t>(selected)];
+    c.fillRect({96, 235, 1728, 315}, surface, 12);
+    c.strokeRect({96, 235, 1728, 315}, rgba(255, 255, 255, 28), 1, 12);
+    const bool tower = current.type == "XboxSeriesX";
+    Rect device = tower ? Rect{154, 282, 90, 180} : Rect{126, 329, 148, 72};
+    c.fillRect(device, rgba(12, 14, 13), 10);
+    c.strokeRect(device, rgba(255, 255, 255, 46), 2, 10);
+    c.fillCircle(static_cast<float>(device.x + (tower ? device.w / 2 : 20)),
+                 static_cast<float>(device.y + (tower ? 20 : device.h / 2)),
+                 tower ? 8.0f : 6.0f, current.power == "On" ? rgba(103, 213, 134) : quiet);
+    const std::string name = current.name.empty() ? "Console" : current.name;
+    fonts_.bold.draw(c, fonts_.bold.fit(name, 36, 1000), 320, 292, 36, ink);
+    std::string model = current.type == "XboxSeriesX" ? "Series X" :
+                        current.type == "XboxSeriesS" ? "Series S" :
+                        current.type == "XboxOneX" ? "One X" :
+                        current.type == "XboxOneS" ? "One S" :
+                        current.type == "XboxOne" ? "One" : current.type;
+    if (model.empty()) model = "Console";
+    fonts_.regular.draw(c, model, 320, 343, 21, muted);
+    const bool on = current.power == "On";
+    const char* state = on ? tr(Str::ConsoleOn) :
+                        current.power == "ConnectedStandby" ? tr(Str::ConsoleSleeping) : tr(Str::ConsoleOff);
+    c.fillCircle(328.0f, 395.0f, 6.0f, on ? rgba(103, 213, 134) : quiet);
+    fonts_.semibold.draw(c, state, 346, 383, 19, on ? ink : muted);
+    c.fillRect({320, 445, 214, 48}, accent, 5);
+    const char* play = "Iniciar Remote Play";
+    fonts_.semibold.draw(c, play, 338, 460, 17, rgba(23, 33, 38));
+    fonts_.regular.draw(c, gamesCount(consoles_.size()), 320, 514, 15, quiet);
+
+    fonts_.semibold.draw(c, "Consoles disponíveis", 96, 608, 24, ink);
+    const int cardW = 520, cardH = 150, gap = 22, startY = 658;
+    for (size_t i = 0; i < consoles_.size(); ++i) {
+        const int col = static_cast<int>(i % 3);
+        const int row = static_cast<int>(i / 3);
+        const Rect card{96 + col * (cardW + gap), startY + row * (cardH + 18), cardW, cardH};
+        if (card.y > 980) break;
+        const bool focused = static_cast<int>(i) == selected;
+        c.fillRect(card, focused ? rgba(168, 196, 207, 28) : surface, 8);
+        c.strokeRect(card, focused ? accent : rgba(255, 255, 255, 28), focused ? 2 : 1, 8);
+        fonts_.semibold.draw(c, fonts_.semibold.fit(consoles_[i].name.empty() ? "Console" : consoles_[i].name,
+                                                     20, cardW - 36),
+                             card.x + 18, card.y + 22, 20, focused ? ink : muted);
+        fonts_.regular.draw(c, consoles_[i].type.empty() ? "Console" : consoles_[i].type,
+                            card.x + 18, card.y + 57, 16, quiet);
+        const bool consoleOn = consoles_[i].power == "On";
+        c.fillCircle(static_cast<float>(card.x + 25), static_cast<float>(card.y + 111), 5,
+                     consoleOn ? rgba(103, 213, 134) : quiet);
+        fonts_.regular.draw(c, consoleOn ? tr(Str::ConsoleOn) :
+                            consoles_[i].power == "ConnectedStandby" ? tr(Str::ConsoleSleeping) : tr(Str::ConsoleOff),
+                            card.x + 40, card.y + 101, 15, muted);
+    }
+    drawHints(c, {{kIconCross, tr(Str::Play)},
+                  {kIconTriangle, tr(Str::SearchAgain)},
+                  {kIconOptions, tr(Str::Settings)},
+                  {kIconTouchpad, tr(Str::HoldSignOut)}});
+    drawToast(c, nowMs);
+}
+
+void AppUi::handleQtLibrary(const NavInput& in, UiEvent& ev) {
+    const auto animatePageTo = [&](float target) {
+        qtLibraryPageScroll_.animateTo(target, in.nowMs, 360);
+    };
+    if (in.l1 || in.r1) {
+        int n = static_cast<int>(tab_) + (in.r1 ? 1 : 3);
+        tab_ = static_cast<Tab>(n % 4);
+        qtLibraryFocus_ = 0;
+        qtLibraryGridFocus_ = false;
+        qtLibraryControlFocus_ = -1;
+        qtLibraryHeroActionFocus_ = 0;
+        gridScroll_ = Anim{};
+        qtLibraryPageScroll_ = Anim{};
+        if (tab_ == Tab::Consoles) ev.action = Action::ConsolesShown;
+        dirty_ = true;
+        return;
+    }
+    if (in.options) {
+        screen_ = Screen::Settings; settingsRow_ = 0; dirty_ = true; return;
+    }
+    if (tab_ == Tab::Consoles) {
+        if (in.triangle || (consolesKnown_ && consoles_.empty() && in.accept)) {
+            consolesKnown_ = false;
+            ev.action = Action::ConsolesShown;
+            dirty_ = true;
+            return;
+        }
+        if (consoles_.empty()) return;
+        const int columns = 3;
+        const int horizontal = in.scrollCards + (in.right ? 1 : 0) - (in.left ? 1 : 0);
+        const int vertical = in.scrollRows + (in.down ? 1 : 0) - (in.up ? 1 : 0);
+        const int next = std::clamp(consoleFocus_ + horizontal + vertical * columns,
+                                    0, static_cast<int>(consoles_.size()) - 1);
+        if (next != consoleFocus_) {
+            consoleFocus_ = next;
+            dirty_ = true;
+        }
+        if (in.accept) {
+            const ConsoleTile& con = consoles_[static_cast<size_t>(consoleFocus_)];
+            ev.action = Action::Play;
+            ev.game.titleId = con.serverId;
+            ev.game.name = con.name.empty() ? "Console" : con.name;
+            ev.game.homeConsole = true;
+        }
+        return;
+    }
+    if (in.triangle) {
+        searching_ = true; searchOnKeys_ = true; query_.clear(); submittedQuery_.clear(); searchSubmitted_ = false;
+        runSearch(); dirty_ = true; return;
+    }
+    std::vector<GameTile>* sourceTiles = tab_ == Tab::Library ? &owned_ :
+                                         tab_ == Tab::Recent ? &recentGames_ : &gamePassPool_;
+    int count = 0;
+    for (const auto& tile : *sourceTiles) if (!hidden_.count(tile.productId)) ++count;
+    auto visibleTileAt = [&](int index) -> const GameTile* {
+        if (index < 0) return nullptr;
+        int visibleIndex = 0;
+        for (const auto& tile : *sourceTiles) {
+            if (hidden_.count(tile.productId)) continue;
+            if (visibleIndex++ == index) return &tile;
+        }
+        return nullptr;
+    };
+    const int columns = qtLibraryColumns_;
+    int vertical = in.scrollRows + (in.down ? 1 : 0) - (in.up ? 1 : 0);
+    int horizontal = in.scrollCards + (in.right ? 1 : 0) - (in.left ? 1 : 0);
+
+    if (!qtLibraryGridFocus_ && qtLibraryControlFocus_ < 0) {
+        if (horizontal) {
+            qtLibraryHeroActionFocus_ = horizontal > 0 ? 1 : 0;
+            dirty_ = true;
+        }
+        if (count > 0 && vertical > 0) {
+            qtLibraryGridFocus_ = true;
+            animatePageTo(600);
+            gridScroll_.target = 0;
+            dirty_ = true;
+            return;
+        }
+        if (in.accept && count > 0) {
+            const GameTile* game = visibleTileAt(std::clamp(qtLibraryFocus_, 0, count - 1));
+            if (!game) return;
+            if (qtLibraryHeroActionFocus_ == 0) {
+                ev.action = Action::Play;
+                ev.game = *game;
+            } else {
+                openDetails(*game);
+            }
+        }
+        return;
+    }
+
+    if (qtLibraryControlFocus_ >= 0) {
+        if (horizontal) {
+            qtLibraryControlFocus_ = std::clamp(qtLibraryControlFocus_ + (horizontal > 0 ? 1 : -1), 0, 2);
+            dirty_ = true;
+        }
+        if (vertical > 0) {
+            qtLibraryControlFocus_ = -1;
+            qtLibraryGridFocus_ = true;
+            animatePageTo(600);
+            dirty_ = true;
+        } else if (vertical < 0) {
+            qtLibraryControlFocus_ = -1;
+            qtLibraryGridFocus_ = false;
+            animatePageTo(0);
+            dirty_ = true;
+        }
+        if (in.accept) {
+            switch (qtLibraryControlFocus_) {
+                case 0:
+                    searching_ = true; searchOnKeys_ = true; query_.clear(); submittedQuery_.clear();
+                    searchSubmitted_ = false; runSearch();
+                    break;
+                case 1: qtLibraryColumns_ = qtLibraryColumns_ == 6 ? 4 : 6; break;
+                case 2: {
+                    qtLibrarySortAZ_ = !qtLibrarySortAZ_;
+                    std::stable_sort(sourceTiles->begin(), sourceTiles->end(), [&](const GameTile& a, const GameTile& b) {
+                        return qtLibrarySortAZ_ ? fold(a.name) < fold(b.name) : fold(a.name) > fold(b.name);
+                    });
+                    qtLibraryFocus_ = 0;
+                    gridScroll_.target = 0;
+                    break;
+                }
+            }
+            dirty_ = true;
+            return;
+        }
+        return;
+    }
+    if (count > 0 && !qtLibraryGridFocus_ && vertical > 0) {
+        qtLibraryGridFocus_ = true;
+        qtLibraryControlFocus_ = -1;
+        animatePageTo(600);
+        gridScroll_.target = 0;
+        dirty_ = true;
+        return;
+    }
+    if (qtLibraryGridFocus_ && vertical < 0 && qtLibraryFocus_ / columns == 0) {
+        qtLibraryGridFocus_ = false;
+        qtLibraryControlFocus_ = 0;
+        animatePageTo(0);
+        dirty_ = true;
+        return;
+    }
+    if (!qtLibraryGridFocus_) horizontal = 0;
+    const int before = qtLibraryFocus_;
+    const int delta = horizontal + vertical * columns;
+    if (count > 0 && qtLibraryGridFocus_ && delta) {
+        qtLibraryFocus_ = std::clamp(qtLibraryFocus_ + delta, 0, count - 1);
+        const int focusRow = qtLibraryFocus_ / columns;
+        // The game grid fills the view beneath the app tabs; the focused card
+        // itself supplies the selection preview.
+        constexpr int firstRowTop = 128, visibleHeight = 800;
+        const int cardH = columns == 6 ? 248 : 360;
+        const int rowPitch = cardH + 70;
+        const int focusedY = firstRowTop + focusRow * rowPitch;
+        if (focusedY < firstRowTop + static_cast<int>(gridScroll_.target))
+            gridScroll_.target = static_cast<float>(std::max(0, focusRow * rowPitch));
+        else if (focusedY + cardH > firstRowTop + static_cast<int>(gridScroll_.target) + visibleHeight)
+            gridScroll_.target = static_cast<float>(std::max(0, focusRow * rowPitch - (visibleHeight - cardH)));
+        dirty_ = true;
+    }
+    if (count > 0 && qtLibraryFocus_ != before) dirty_ = true;
+    if (in.accept && count > 0) {
+        if (const GameTile* game = visibleTileAt(qtLibraryFocus_)) openDetails(*game);
+    }
+    if (in.square && count > 0) {
+        if (const GameTile* game = visibleTileAt(qtLibraryFocus_)) toggleHidden(*game, ev);
+        qtLibraryFocus_ = std::min(qtLibraryFocus_, std::max(0, count - 2));
+    }
+    if (in.r3 && tab_ == Tab::Library) {
+        librarySort_ = static_cast<LibrarySort>((static_cast<int>(librarySort_) + 1) % static_cast<int>(LibrarySort::Count));
+        rebuild(true); prefsEvent(ev);
+    }
+}
+
 void AppUi::drawSearch(Canvas& c, uint64_t nowMs) {
     drawBackground(c);
     // Results on the right.
@@ -2555,7 +3143,9 @@ void AppUi::drawSearch(Canvas& c, uint64_t nowMs) {
              kGridTop - 20);
     drawTopBar(c);
     drawTabs(c);
-    const char* scope = tab_ == Tab::GamePass ? tr(Str::TabGamePass) : tr(Str::YourGames);
+    const char* scope = tab_ == Tab::GamePass ? tr(cloudLibraryMode_ ? Str::CloudCatalog : Str::TabGamePass) :
+                        tab_ == Tab::Recent ? "Recentes" :
+                        tr(cloudLibraryMode_ ? Str::OwnedGames : Str::YourGames);
     bool filtering = anyFilter();
     if (query_.empty() && !filtering) {
         fonts_.semibold.draw(c, tr(Str::SearchHint), kResultsX, 150, 26, kDim);
@@ -2781,6 +3371,8 @@ void AppUi::drawConsoles(Canvas& c, uint64_t nowMs) {
 
 void AppUi::drawHome(Canvas& c, uint64_t nowMs) {
     if (searching_) return drawSearch(c, nowMs);
+    if (qtLibraryUi_ && tab_ == Tab::Consoles) return drawQtConsoles(c, nowMs);
+    if (qtLibraryUi_) return drawQtLibrary(c, nowMs);
     if (tab_ == Tab::Library) return drawLibrary(c, nowMs);
     if (tab_ == Tab::Consoles) return drawConsoles(c, nowMs);
     const GameTile* focus = focusedTile();
@@ -2839,7 +3431,9 @@ void AppUi::drawHome(Canvas& c, uint64_t nowMs) {
                 fonts_.semibold.draw(c, gamesCount(row.tiles.size()), gridLeft + w + 20, hy + 20, 22, kDim);
             }
 
-            for (size_t i = 0; i < row.tiles.size(); ++i) {
+            // Skip rows above the viewport instead of walking the whole catalogue.
+            const size_t firstVisible = static_cast<size_t>(std::max(0, (140 - cardY - kCard - 40) / kGridPitchY)) * kLibraryCols;
+            for (size_t i = firstVisible; i < row.tiles.size(); ++i) {
                 int c_col = static_cast<int>(i) % kLibraryCols;
                 int c_row = static_cast<int>(i) / kLibraryCols;
                 int cy = cardY + c_row * kGridPitchY;
@@ -3517,11 +4111,15 @@ void AppUi::drawGameSettings(Canvas& c) {
 
 void AppUi::render(Canvas& c, uint64_t nowMs) {
     std::lock_guard<std::mutex> lock(mutex_);
+    c.beginGpuFrame();
     float dt = lastRender_ ? std::min(0.1f, (nowMs - lastRender_) / 1000.0f) : 0.0f;
     lastRender_ = nowMs;
     animating_ = rowY_.step(dt);
     for (auto& a : rowScroll_) animating_ |= a.step(dt);
     animating_ |= gridScroll_.step(dt);
+    // Keep one clear in-between frame even when the UI loop has a long frame
+    // interval: a single D-pad press should visibly animate the page change.
+    animating_ |= qtLibraryPageScroll_.stepTimed(nowMs);
     animating_ |= resultScroll_.step(dt);
     dirty_ = false;
     switch (screen_) {

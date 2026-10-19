@@ -67,7 +67,9 @@ jobs:
           mkdir release-output
           cp "build-ps4-homebrew/$package" release-output/
           (cd release-output && sha256sum "$package" > SHA256SUMS)
-          printf 'App: %s\nBuild: %s\nCommit: %s\nTitle ID: PSBX00001\nInstaller: 00.01\nRuntime validation: pending\n' "$version" "$build" "$GITHUB_SHA" > release-output/BUILD.txt
+          installer=$(awk '/^[[:space:]]*VERSION 00\.[0-9][0-9][[:space:]]*$/ {gsub(/[^0-9.]/, ""); value=$0} END {print value}' ps4-homebrew/CMakeLists.txt)
+          test -n "$installer"
+          printf 'App: %s\nBuild: %s\nCommit: %s\nTitle ID: PSBX00001\nInstaller: %s\nRuntime validation: pending\n' "$version" "$build" "$GITHUB_SHA" "$installer" > release-output/BUILD.txt
       - name: Save package only
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

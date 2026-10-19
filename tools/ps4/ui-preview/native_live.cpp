@@ -35,7 +35,7 @@ const uint32_t* psbox_preview_render(void* context,const uint32_t* v,size_t coun
         s.bitrate=std::clamp(v[4],3u,30u)*1000000;s.bitrateCustom=v[5]!=0;s.upscaler=std::min(v[6],2u);
         s.volume=std::min(v[7],100u);s.statsMode=std::min(v[8],2u);
         s.fsrSettingsOpen=v[9]!=0;s.fsrSettingsRow=std::min(v[10],2u);
-        s.rcasSharpness=std::min(v[11],4u);s.fsrScaleFactor=std::clamp(v[12],1u,2u);
+        s.rcasSharpness=std::min(v[11],4u);s.fsrTargetHeight=(v[12] == 1440 || v[12] == 2160 ? v[12] : 1080u);
         s.automaticReset=v[13]!=0;s.frameWait=std::min(v[14],1u);
         s.panelOpen=v[15]!=0;s.focusInPanel=v[16]!=0;s.audioAvailable=true;
         s.newStatsUiEnabled=v[17]!=0;s.statsSettingsOpen=v[18]!=0;

@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
         else if (key == "fsr") menu.fsrSettingsOpen = value != 0;
         else if (key == "fsr_row") menu.fsrSettingsRow = static_cast<uint8_t>(std::min(value, 3u));
         else if (key == "sharpness") menu.rcasSharpness = std::min(value, 4u);
-        else if (key == "scale") menu.fsrScaleFactor = std::clamp(value, 1u, 2u);
+        else if (key == "scale") menu.fsrTargetHeight = (value == 1440 || value == 2160 ? value : 1080u);
         else if (key == "reset") menu.automaticReset = value != 0;
         else if (key == "pacing") menu.frameWait = std::min(value, 1u);
         else if (key == "source") {

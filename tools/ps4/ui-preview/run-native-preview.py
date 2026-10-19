@@ -46,7 +46,7 @@ class PreviewWindow(QMainWindow):
             raise RuntimeError("Não foi possível criar a prévia C++ ou carregar as fontes")
         self.dirty = True
         self.values = dict(row=0, tier=720, fps=60, bitrate=3, bitrate_custom=0, filter=1, volume=80,
-                           stats=2, fsr=0, fsr_row=0, sharpness=4, scale=2, reset=0, pacing=0)
+                           stats=2, fsr=0, fsr_row=0, sharpness=0, scale=1080, reset=0, pacing=0)
         self.preview_condition = 0
         self.stats_enabled = 1
         self.stats_open = False
@@ -165,7 +165,7 @@ class PreviewWindow(QMainWindow):
         elif self.card in self.rows:
             if v["fsr"] and self.card == 0:
                 key = ("sharpness", "scale", "filter")[v["fsr_row"]]
-                v[key] = (v[key] + step) % 5 if key == "sharpness" else (v[key] + step) % 3 if key == "filter" else 3-v[key]
+                v[key] = max(0, min(4, v[key] - step)) if key == "sharpness" else (v[key] + step) % 3 if key == "filter" else (1080,1440,2160)[((1080,1440,2160).index(v[key])+step)%3]
                 return
             key = {0: "tier", 1: "bitrate", 2: "fps", 3: "reset", 4: "filter", 5: "pacing", 6: "stats", 7: "new_stats", 8: "configure_stats", 9: "bitrate_mode"}.get(v["row"], "")
             if self.card == 0 and v["row"] == 7:

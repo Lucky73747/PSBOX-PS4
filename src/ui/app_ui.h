@@ -57,6 +57,8 @@ struct GameTile {
     uint8_t languages = 0;
     // Active friends playing this game now
     std::vector<FriendPlaying> friends;
+    // GSSV entitlement independent of a subscription; not a complete purchase inventory.
+    bool accountOwned = false;
 };
 
 // One of the user's own consoles, as "My consoles" shows it.
@@ -76,7 +78,7 @@ struct GameRow {
 enum class Screen { Splash, SignIn, Home, Details, Launching, Streaming, Error, Settings, Updating };
 
 // The home screen's tabs (L1 / R1). Triangle searches the current one.
-enum class Tab { GamePass, Library, Consoles };
+enum class Tab { GamePass, Library, Recent, Consoles };
 
 struct NavInput {
     bool up = false, down = false, left = false, right = false;
@@ -167,6 +169,8 @@ public:
     void setOwned(std::vector<GameTile> owned, std::vector<GameTile> purchasable, bool known);
     // Replaces the streaming library while preserving the focused game and screen.
     void setCloudLibrary(std::vector<GameTile> titles);
+    // Records a title when its stream is launched; recent history lasts for this app run.
+    void recordRecentGame(const GameTile& game);
     // "My consoles"; `known` false while they load.
     void setConsoles(std::vector<ConsoleTile> consoles, bool known);
     // The lists' background refresh: shown as a bar in "Your games" and the
@@ -250,6 +254,8 @@ public:
     Tab tab() const;
     // Switches the home screen's tab (autoplay tests).
     void showTab(Tab t);
+    // Enable the native C++ library layout ported from the desktop prototype.
+    void setQtLibraryUi(bool enabled);
     // Autoplay tests: a tab's search with these filters (`mode` and
     // `language` as their lists' index, `genre` "" for all), optionally with
     // `openList` (0 mode, 1 genre, 2 language) open; and the first results.
@@ -269,7 +275,12 @@ public:
 private:
     struct Anim {
         float value = 0, target = 0;
-        bool step(float dt);  // true while moving
+        float timedFrom = 0;
+        uint64_t timedStartMs = 0, timedDurationMs = 0;
+        bool timed = false;
+        bool step(float dt, float maxStep = 1.0f);  // true while moving
+        void animateTo(float next, uint64_t nowMs, uint64_t durationMs);
+        bool stepTimed(uint64_t nowMs);
     };
 
     const GameTile* focusedTile() const;
@@ -287,6 +298,9 @@ private:
     void drawSplash(Canvas& c, uint64_t nowMs);
     void drawSignIn(Canvas& c, uint64_t nowMs);
     void drawHome(Canvas& c, uint64_t nowMs);
+    void drawQtLibrary(Canvas& c, uint64_t nowMs);
+    void drawQtConsoles(Canvas& c, uint64_t nowMs);
+    void handleQtLibrary(const NavInput& in, UiEvent& ev);
     void drawTabs(Canvas& c);
     void drawConsoles(Canvas& c, uint64_t nowMs);
     void drawLibrary(Canvas& c, uint64_t nowMs);
@@ -376,6 +390,15 @@ private:
     std::vector<Anim> rowScroll_;
     Anim rowY_;
     Tab tab_ = Tab::GamePass;
+    bool cloudLibraryMode_ = false;
+    bool qtLibraryUi_ = false;
+    int qtLibraryFocus_ = 0; // focused title index in the currently displayed catalog
+    bool qtLibraryGridFocus_ = false; // down opens the shelf; up from its first row focuses shelf controls
+    int qtLibraryControlFocus_ = -1; // -1 when controls are not focused, otherwise shelf control index
+    int qtLibraryHeroActionFocus_ = 0; // 0 play, 1 details
+    int qtLibraryColumns_ = 6;
+    bool qtLibrarySortAZ_ = false;
+    Anim qtLibraryPageScroll_; // animate the hero out and bring the game grid into the main view
     std::vector<ConsoleTile> consoles_;
     bool allow1440_ = false;
     bool consolesKnown_ = false;
@@ -402,7 +425,7 @@ private:
     int gridFocus_ = 0;
     Anim gridScroll_;
     bool searching_ = false;  // the search of `tab_` is open
-    std::vector<GameTile> gamePassPool_, libraryPool_, results_;
+    std::vector<GameTile> gamePassPool_, libraryPool_, recentGames_, results_;
     std::string query_;
     std::string submittedQuery_;
     bool searchSubmitted_ = false;

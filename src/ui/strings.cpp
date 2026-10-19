@@ -241,6 +241,9 @@ constexpr Column kEnglish = {
     "Audio output",                                  // MenuAudioOutput
     "TV",                                            // AudioRouteTv
     "DualSense Speaker",                             // AudioRoutePad
+    "Catalog", // CloudCatalog
+    "Owned games", // OwnedGames
+    "Cloud games entitled outside a subscription; this list may be incomplete.", // OwnedGamesHint
 };
 
 constexpr Column kPortugueseBR = {
@@ -452,6 +455,9 @@ constexpr Column kPortugueseBR = {
     "Saída de áudio",
     "TV",
     "Alto-falante do controle",
+    "Catálogo", // CloudCatalog
+    "Jogos possuídos", // OwnedGames
+    "Jogos na nuvem com acesso sem assinatura; a lista pode ser incompleta.", // OwnedGamesHint
 };
 
 constexpr Column kSpanish = {
@@ -663,6 +669,9 @@ constexpr Column kSpanish = {
     "Salida de audio",
     "TV",
     "Altavoz del mando",
+    "Catálogo", // CloudCatalog
+    "Juegos propios", // OwnedGames
+    "Juegos en la nube sin suscripción; la lista puede ser incompleta.", // OwnedGamesHint
 };
 
 constexpr Column kFrench = {
@@ -874,6 +883,9 @@ constexpr Column kFrench = {
     "Sortie audio",
     "TV",
     "Haut-parleur de la manette",
+    "Catalogue", // CloudCatalog
+    "Jeux possédés", // OwnedGames
+    "Jeux cloud accessibles hors abonnement ; liste potentiellement incomplète.", // OwnedGamesHint
 };
 
 constexpr Column kGerman = {
@@ -1085,6 +1097,9 @@ constexpr Column kGerman = {
     "Audioausgabe",
     "TV",
     "Controller-Lautsprecher",
+    "Katalog", // CloudCatalog
+    "Eigene Spiele", // OwnedGames
+    "Cloud-Spiele außerhalb des Abos; diese Liste kann unvollständig sein.", // OwnedGamesHint
 };
 
 constexpr Column kItalian = {
@@ -1296,6 +1311,9 @@ constexpr Column kItalian = {
     "Uscita audio",
     "TV",
     "Altoparlante del controller",
+    "Catalogo", // CloudCatalog
+    "Giochi posseduti", // OwnedGames
+    "Giochi cloud senza abbonamento; l’elenco può essere incompleto.", // OwnedGamesHint
 };
 
 constexpr std::array<const Column*, kLangs> kTable = {&kEnglish, &kPortugueseBR, &kSpanish,

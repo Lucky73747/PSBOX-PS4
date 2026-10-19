@@ -36,10 +36,11 @@ struct StreamMenuUiState {
     bool bitrateCustom = false;
     uint32_t fps = 60;
     uint32_t upscaler = 1;
-    uint32_t rcasSharpness = 4;
-    uint32_t fsrScaleFactor = 2;
+    uint32_t rcasSharpness = 0;
+    uint32_t fsrTargetHeight = 1080;
     uint32_t frameWait = 1;
     uint32_t volume = 100;
+    bool gpuVideoActive = false;
     uint32_t width = 0;
     uint32_t height = 0;
     int rttMs = -1;

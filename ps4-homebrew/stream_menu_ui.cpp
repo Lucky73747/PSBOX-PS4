@@ -261,63 +261,95 @@ void image(Panel& p) {
 }
 void fsr(Panel& p, int outputWidth, int outputHeight) {
     const auto& s=p.state;
-    static const char* sharp[]{"Máxima","Alta","Equilibrada","Suave","Mínima"};
     static const char* filters[]{"Bilinear","FSR 1","Nativo"};
-    p.group("Nitidez",1); p.value("RCAS",sharp[std::min(s.rcasSharpness,4u)],0);
-    const bool canSelect2x = s.fsrScaleFactor == 2 && s.requestedTier == "1080" &&
-        s.width == 1920 && s.height == 1080 && outputWidth == 1920 && outputHeight == 1080;
-    const bool canSupersample = s.upscaler == 1 && canSelect2x;
-    const auto formatResolution = [](int width, int height, char* out, size_t capacity) {
-        if (width == 3840 && height == 2160) std::snprintf(out, capacity, "2160p (4K)");
-        else if (width == 2560 && height == 1440) std::snprintf(out, capacity, "1440p");
-        else if (width == 1920 && height == 1080) std::snprintf(out, capacity, "1080p");
-        else if (width == 1280 && height == 720) std::snprintf(out, capacity, "720p");
-        else std::snprintf(out, capacity, "%dx%d", width, height);
-    };
-    char outputTarget[32];
-    formatResolution(outputWidth, outputHeight, outputTarget, sizeof(outputTarget));
-    p.group("Escala experimental",1);
-    char scaleValue[48];
-    if (s.fsrScaleFactor == 1)
-        std::snprintf(scaleValue,sizeof(scaleValue),"%s · 1×",outputTarget);
-    else if (canSupersample)
-        std::snprintf(scaleValue,sizeof(scaleValue),"2160p (4K) · 2×");
-    else if (canSelect2x && s.upscaler == 0)
-        std::snprintf(scaleValue,sizeof(scaleValue),"2× · FSR desligado");
-    else if (canSelect2x)
-        std::snprintf(scaleValue,sizeof(scaleValue),"2× · modo nativo");
-    else
-        std::snprintf(scaleValue,sizeof(scaleValue),"2× indisponível");
-    p.value("Alvo EASU",scaleValue,1);
+    p.group("Nitidez RCAS",1,86);
+    const float sharpnessY=p.row("",0,86);
+    const uint32_t sharpnessLevel=std::min(s.rcasSharpness,4u);
+    const uint32_t sharpnessPercent=(4u-sharpnessLevel)*25u;
+    constexpr float sharpnessX=126.0f, sharpnessWidth=188.0f;
+    char sharpnessText[16];std::snprintf(sharpnessText,sizeof(sharpnessText),"%u%%",sharpnessPercent);
+    p.p.text("Força",26,sharpnessY+10,12,kMuted);
+    p.p.text(sharpnessText,354-p.p.measure(sharpnessText,15,true),sharpnessY+8,15,kText,true);
+    const float trackY=sharpnessY+39;
+    p.p.fill(sharpnessX,trackY-4,sharpnessWidth,8,rgba(62,66,63),4);
+    const float sharpnessFill=sharpnessWidth*sharpnessPercent/100.0f;
+    if(sharpnessFill>0) p.p.fill(sharpnessX,trackY-4,sharpnessFill,8,kAccent,4);
+    for(uint32_t i=0;i<5;++i) {
+        const float x=sharpnessX+sharpnessWidth*float(i)/4.0f;
+        p.p.line(x,trackY-5,x,trackY+5,rgba(31,34,32),2.0f);
+    }
+    const float thumbX=sharpnessX+sharpnessFill;
+    p.p.circle(thumbX,trackY,10,rgba(20,23,22));
+    p.p.circle(thumbX,trackY,8,kText);
+    p.p.circle(thumbX,trackY,10,kAccent,true);
+    p.p.text("Suave",sharpnessX,sharpnessY+57,10,kMuted);
+    p.p.text("Forte",sharpnessX+sharpnessWidth-p.p.measure("Forte",10),sharpnessY+57,10,kMuted);
+    const bool fsrEnabled = s.upscaler == 1;
+    const uint32_t targetHeight = s.fsrTargetHeight == 1440 || s.fsrTargetHeight == 2160 ? s.fsrTargetHeight : 1080;
+    p.group("Alvo EASU experimental",1);
+    const char* target = targetHeight == 2160 ? "2160p (4K)" : targetHeight == 1440 ? "1440p" : "1080p";
+    p.value("Resolução EASU",target,1);
     p.group("Processamento",1);
     p.segments("Escala de saída",filters,3,std::min(s.upscaler,2u),2,22);
     if(s.fsrExperimentalUnlocked) {
         p.group("Experimental",1); p.value("RCAS nativo 1080p",s.nativeRcas?"Ativo":"Desativado",3);
     }
-    const char* scaleNote = s.upscaler == 2 ? "Nativo 1:1: mantém os pixels; sem ampliação." :
-        s.upscaler == 0 ? "Bilinear: EASU e RCAS desligados." :
-        canSupersample ? "EASU 2160p reduz para a saída 1080p." :
-        (canSelect2x ? "2× disponível ao ativar FSR." :
-        (s.width == 1280 && s.height == 720 ? "Fonte 720p: EASU vai direto à saída." :
-                                               "2× exige entrada e saída 1920×1080."));
-    p.p.text(scaleNote,18,p.y+12,12,kMuted);
+    p.y+=9;
+    p.p.fill(14,p.y,352,58,kCard,10);
+    p.p.stroke(14,p.y,352,58,rgba(49,52,50),1,10);
+    p.p.text("Efeito na imagem",26,p.y+7,11,kMuted,true);
+    char effect[64]{};
+    char detail[80]{};
+    const uint32_t sourceWidth=s.width, sourceHeight=s.height;
+    const uint32_t targetWidth=targetHeight*16u/9u;
+    const bool hasFrame=sourceWidth>0&&sourceHeight>0;
+    const bool directUpscale=hasFrame&&outputWidth>=0&&outputHeight>=0&&
+        static_cast<uint32_t>(outputWidth)>=sourceWidth&&static_cast<uint32_t>(outputHeight)>=sourceHeight&&
+        (static_cast<uint32_t>(outputWidth)>sourceWidth||static_cast<uint32_t>(outputHeight)>sourceHeight);
+    const bool targetPass=hasFrame&&targetWidth>static_cast<uint32_t>(std::max(outputWidth,0))&&
+        targetHeight>static_cast<uint32_t>(std::max(outputHeight,0))&&targetWidth>=sourceWidth&&targetHeight>=sourceHeight;
+    if(!s.gpuVideoActive) {
+        std::snprintf(effect,sizeof(effect),"GPU de vídeo inativa");
+        std::snprintf(detail,sizeof(detail),"FSR 1 selecionado, sem efeito no fallback");
+    } else if(!fsrEnabled) {
+        std::snprintf(effect,sizeof(effect),"%s selecionado",s.upscaler==2?"Nativo":"Bilinear");
+        std::snprintf(detail,sizeof(detail),"FSR 1 está desligado");
+    } else if(!hasFrame) {
+        std::snprintf(effect,sizeof(effect),"FSR 1 selecionado");
+        std::snprintf(detail,sizeof(detail),"Aguardando o primeiro quadro de vídeo");
+    } else if(targetPass) {
+        std::snprintf(effect,sizeof(effect),"Alvo %up · experimental",targetHeight);
+        std::snprintf(detail,sizeof(detail),"Caminho GPU efetivo: gpu_scaler no Klog");
+    } else if(directUpscale) {
+        std::snprintf(effect,sizeof(effect),"EASU + RCAS ativos");
+        std::snprintf(detail,sizeof(detail),"%ux%u ampliado para %up",sourceWidth,sourceHeight,outputHeight);
+    } else if(s.nativeRcas&&s.requestedTier=="1080"&&sourceWidth==1920&&sourceHeight==1080&&
+              outputWidth==1920&&outputHeight==1080) {
+        std::snprintf(effect,sizeof(effect),"RCAS nativo ativo · experimental");
+        std::snprintf(detail,sizeof(detail),"EASU não amplia vídeo já em 1080p");
+    } else {
+        std::snprintf(effect,sizeof(effect),"Sem escala nesta resolução");
+        std::snprintf(detail,sizeof(detail),"%ux%u → %dx%d; EASU/RCAS não processam",sourceWidth,sourceHeight,outputWidth,outputHeight);
+    }
+    p.p.text(effect,26,p.y+22,13,kText,true);
+    p.p.text(detail,26,p.y+40,10,kMuted);
 }
 void controls(Panel& p) {
     p.group("Atalhos do controle",6);
     float y=p.row("Selecionar / confirmar",-1);padButton(p.p,PadButton::Cross,323,y+15);
     y=p.row("Voltar / cancelar",-1);padButton(p.p,PadButton::Circle,323,y+15);
-    y=p.row("Abrir menu",-1); padButton(p.p,PadButton::Options,321,y+15);
+    y=p.row("Abrir menu (0,7 s)",-1); padButton(p.p,PadButton::Options,321,y+15);
     y=p.row("Trocar painel",-1);
     padButton(p.p,PadButton::L1,280,y+15);padButton(p.p,PadButton::R1,323,y+15);
     y=p.row("Guide",-1);padButton(p.p,PadButton::Touchpad,313,y+13);
-    y=p.row("Sair do jogo",-1);
-    padButton(p.p,PadButton::Options,279,y+15);
-    p.p.line(313,y+26,313,y+34,kMuted,1.5f);p.p.line(309,y+30,317,y+30,kMuted,1.5f);
-    padButton(p.p,PadButton::Circle,327,y+15);
+    y=p.row("Cartão vermelho: encerrar",-1);
+    padButton(p.p,PadButton::Cross,323,y+15);
 }
 
 void volume(Panel& p) {
     p.group("Saída",1);
+    p.p.text("Mutar",292,p.y-16,11,kMuted);
+    padButton(p.p,PadButton::Triangle,338,p.y-22,18);
     if(!p.state.audioAvailable) {p.row("Áudio indisponível nesta sessão",-1);return;}
     const uint32_t currentVolume=std::min(p.state.volume,100u);
     const float y=p.row("",-1);
@@ -366,7 +398,7 @@ void statsSettings(Panel& p) {
 }
 float height(unsigned card,const StreamMenuUiState& s) {
     if(card==4) return 150;
-    if(card==0) return s.fsrSettingsOpen ? (s.fsrExperimentalUnlocked?403:310) :
+    if(card==0) return s.fsrSettingsOpen ? (s.fsrExperimentalUnlocked?500:400) :
         (s.bitrateCustom ? 416 : 356);
     if(card==1) return 410;
     if(card==2) return 110;

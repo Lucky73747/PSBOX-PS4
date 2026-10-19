@@ -51,9 +51,9 @@ struct CanvasFrameUpdateResult {
     const xc::ui::Canvas* gpuUi = nullptr;
     uint32_t targetFps = 60;
     uint32_t upscaler = 1; // 0 bilinear, 1 FSR1 EASU RGB + RCAS, 2 native 1:1 pixels
-    uint32_t rcasSharpness = 2; // 0..4, half-stop attenuation each
+    uint32_t rcasSharpness = 0; // 0..4, half-stop attenuation each
     bool nativeRcas = false; // Experimental: RCAS at native 1080p source/output.
-    uint32_t fsrScaleFactor = 1; // 1x output resolution, 2x intermediate EASU then downsample.
+    uint32_t fsrTargetHeight = 1080; // EASU target height: 1080, 1440 or 2160 (not a multiplier).
     bool requested1080p = false; // Guard experimental 2x when the user selected 720p.
 };
 

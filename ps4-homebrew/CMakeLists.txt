@@ -12,6 +12,12 @@ if(NOT PSBOX_BUILD_NUMBER_DEFAULT MATCHES "^[0-9]+$")
 endif()
 project(psbox_ps4 VERSION "${PSBOX_VERSION}" LANGUAGES C CXX)
 set(PSBOX_BUILD_NUMBER "${PSBOX_BUILD_NUMBER_DEFAULT}" CACHE STRING "PSBOX source build number")
+set(PSBOX_LIBRARY_LAYOUT "NEW" CACHE STRING "Default library UI layout: NEW or LEGACY")
+set_property(CACHE PSBOX_LIBRARY_LAYOUT PROPERTY STRINGS NEW LEGACY)
+string(TOUPPER "${PSBOX_LIBRARY_LAYOUT}" PSBOX_LIBRARY_LAYOUT)
+if(NOT PSBOX_LIBRARY_LAYOUT STREQUAL "NEW" AND NOT PSBOX_LIBRARY_LAYOUT STREQUAL "LEGACY")
+  message(FATAL_ERROR "PSBOX_LIBRARY_LAYOUT must be NEW or LEGACY")
+endif()
 if(NOT PSBOX_BUILD_NUMBER MATCHES "^[0-9]+$")
   message(FATAL_ERROR "PSBOX_BUILD_NUMBER must be numeric")
 endif()
@@ -149,6 +155,11 @@ target_include_directories(xcloud_homebrew PRIVATE
   "${ORBIS_MESA_SRC}/include")
 target_compile_definitions(xcloud_homebrew PRIVATE
   "PSBOX_BUILD_LABEL=\"PSBOX-PS4-v${PROJECT_VERSION}-build${PSBOX_BUILD_NUMBER}\"")
+if(PSBOX_LIBRARY_LAYOUT STREQUAL "NEW")
+  target_compile_definitions(xcloud_homebrew PRIVATE PSBOX_DEFAULT_NEW_LIBRARY_UI=1)
+else()
+  target_compile_definitions(xcloud_homebrew PRIVATE PSBOX_DEFAULT_NEW_LIBRARY_UI=0)
+endif()
 # Keep the RADV archive whole so the linked ICD retains its entry points. The
 # explicit -Wl form is required by the Clang 21 driver in this workspace.
 target_link_options(xcloud_homebrew PRIVATE "-Wl,--wrap=sceVideoOutSubmitFlip")
@@ -195,7 +206,7 @@ if(COMMAND ps4_create_pkg)
   ps4_create_pkg(xcloud_homebrew
     TITLE_ID PSBX00001
     TITLE "PSBOX"
-    VERSION 00.01
+    VERSION 00.02
     CONTENT_LABEL PSBOXPS4
     ICON "${CMAKE_CURRENT_LIST_DIR}/../assets/ps4/icon0.png"
     EXTRA_FILES

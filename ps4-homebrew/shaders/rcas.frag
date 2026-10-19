@@ -21,12 +21,18 @@ layout(push_constant) uniform VideoParams {
 #define FSR_RCAS_DENOISE 1
 vec4 loadResolved(ivec2 p) {
     if ((uint(params.padding) & 32u) == 0u) return texelFetch(scaledVideo,p,0);
-    ivec2 size = textureSize(scaledVideo,0);
-    ivec2 base = p * 2;
-    vec4 sum = texelFetch(scaledVideo,clamp(base,ivec2(0),size-1),0);
-    sum += texelFetch(scaledVideo,clamp(base+ivec2(1,0),ivec2(0),size-1),0);
-    sum += texelFetch(scaledVideo,clamp(base+ivec2(0,1),ivec2(0),size-1),0);
-    sum += texelFetch(scaledVideo,clamp(base+ivec2(1,1),ivec2(0),size-1),0);
+    vec2 size = vec2(textureSize(scaledVideo,0));
+    // Integrate four samples over one output-pixel footprint. Handles both
+    // 1440p -> 1080p (4/3) and 2160p -> 1080p (2), without a fixed 2x mapping.
+    vec2 outputSize = vec2(params.targetSize);
+    vec2 center = (vec2(p) + 0.5) / outputSize;
+    vec2 offset = 0.25 / outputSize;
+    vec2 lo = 0.5 / size;
+    vec2 hi = vec2(1.0) - lo;
+    vec4 sum = textureLod(scaledVideo,clamp(center+vec2(-offset.x,-offset.y),lo,hi),0.0);
+    sum += textureLod(scaledVideo,clamp(center+vec2(offset.x,-offset.y),lo,hi),0.0);
+    sum += textureLod(scaledVideo,clamp(center+vec2(-offset.x,offset.y),lo,hi),0.0);
+    sum += textureLod(scaledVideo,clamp(center+offset,lo,hi),0.0);
     return sum * 0.25;
 }
 AF4 FsrRcasLoadF(ASU2 p) {

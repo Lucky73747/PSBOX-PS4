@@ -29,6 +29,34 @@ inline uint32_t clampCoverage(float v) {
 
 void Canvas::setClip(Rect r) { clip_ = intersect(r, {0, 0, w_, h_}); }
 
+void Canvas::enableGpuUi(bool enabled) {
+    if (gpuUi_ == enabled) return;
+    gpuUi_ = enabled;
+    gpuCommands_.clear();
+}
+
+void Canvas::enableGpuText(bool enabled) {
+    if (gpuText_ == enabled) return;
+    gpuText_ = enabled;
+    gpuCommands_.clear();
+    gpuGlyphs_.clear();
+    gpuAtlas_.clear();
+    atlasX_ = atlasY_ = atlasRow_ = 0;
+    gpuAtlasOverflow_ = false;
+    if (enabled) gpuAtlas_.resize(static_cast<size_t>(w_) * h_, 0u);
+    ++gpuAtlasGeneration_;
+}
+
+void Canvas::beginGpuFrame() {
+    gpuCommands_.clear();
+    if (!gpuAtlasOverflow_) return;
+    gpuGlyphs_.clear();
+    atlasX_ = atlasY_ = atlasRow_ = 0;
+    gpuAtlasOverflow_ = false;
+    gpuAtlas_.assign(static_cast<size_t>(w_) * h_, 0u);
+    ++gpuAtlasGeneration_;
+}
+
 inline void Canvas::blend(uint32_t& dst, Color src, uint32_t a) const {
     if (a == 0) return;
     if (a >= 255 || (dst >> 24) == 0) {
@@ -54,7 +82,9 @@ inline void Canvas::blend(uint32_t& dst, Color src, uint32_t a) const {
     dst = (outA << 24) | (composite(16) << 16) | (composite(8) << 8) | composite(0);
 }
 
-void Canvas::clear(Color c) { std::fill(px_.begin(), px_.end(), c | 0xFF000000u); }
+void Canvas::clear(Color c) {
+    std::fill(px_.begin(), px_.end(), c | 0xFF000000u);
+}
 void Canvas::clearTransparent() {
     if (gpuUi_) { gpuCommands_.clear(); return; }
     std::fill(px_.begin(), px_.end(), 0u);
@@ -267,6 +297,28 @@ void Canvas::drawImage(const Image& img, int x, int y, uint8_t opacity, int radi
     bool circle = radius < 0;
     if (circle) radius = std::min(img.w, img.h) / 2;
     radius = std::min(radius, std::min(img.w, img.h) / 2);
+    if (img.opaque && opacity == 255 && !circle) {
+        const int right = b.x + b.w;
+        for (int yy = b.y; yy < b.y + b.h; ++yy) {
+            uint32_t* row = &px_[static_cast<size_t>(yy) * w_];
+            const uint32_t* src = &img.px[static_cast<size_t>(yy - y) * img.w];
+            const bool cornerRow = radius > 0 && (yy < y + radius || yy >= y + img.h - radius);
+            if (!cornerRow) {
+                std::copy_n(src + (b.x - x), b.w, row + b.x);
+                continue;
+            }
+
+            const int middleStart = std::clamp(x + radius, b.x, right);
+            const int middleEnd = std::clamp(x + img.w - radius, middleStart, right);
+            for (int xx = b.x; xx < middleStart; ++xx)
+                blend(row[xx], src[xx - x], cornerCoverage(r, radius, xx, yy));
+            if (middleEnd > middleStart)
+                std::copy_n(src + (middleStart - x), middleEnd - middleStart, row + middleStart);
+            for (int xx = middleEnd; xx < right; ++xx)
+                blend(row[xx], src[xx - x], cornerCoverage(r, radius, xx, yy));
+        }
+        return;
+    }
     for (int yy = b.y; yy < b.y + b.h; ++yy) {
         uint32_t* row = &px_[static_cast<size_t>(yy) * w_];
         const uint32_t* src = &img.px[static_cast<size_t>(yy - y) * img.w];
@@ -282,7 +334,15 @@ void Canvas::drawImage(const Image& img, int x, int y, uint8_t opacity, int radi
 }
 
 void Canvas::drawMask(const uint8_t* mask, int mw, int mh, int stride, int x, int y, Color c) {
-    if (gpuUi_) {
+    drawMaskImpl(mask, mw, mh, stride, x, y, c, false);
+}
+
+void Canvas::drawGlyphMask(const uint8_t* mask, int mw, int mh, int stride, int x, int y, Color c) {
+    drawMaskImpl(mask, mw, mh, stride, x, y, c, true);
+}
+
+void Canvas::drawMaskImpl(const uint8_t* mask, int mw, int mh, int stride, int x, int y, Color c, bool glyph) {
+    if (gpuUi_ || (glyph && gpuText_)) {
         if (!mask || mw <= 0 || mh <= 0) return;
         // Content key survives font-cache allocation changes; color is a draw parameter.
         uint64_t key = 1469598103934665603ull;
