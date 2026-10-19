@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "stream_stats_ui.h"
+#include "ui/strings.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,6 +11,9 @@
 namespace xc::ps4 {
 namespace {
 using namespace xc::ui;
+const char* uiText(const char* en, const char* pt) {
+    return language() == Language::PortugueseBR ? pt : en;
+}
 constexpr Color kWhite = rgba(244,245,242), kMuted = rgba(195,201,196);
 constexpr Color kGreen = rgba(127,214,164), kYellow = rgba(242,193,78), kRed = rgba(255,107,107);
 enum class Level { Ok, Warn, Bad };
@@ -56,7 +60,7 @@ void drawStreamCompactStatsUi(Canvas& c,Fonts& fonts,const StreamStatsUiData& d,
     fonts.semibold.draw(c,metrics,x+20,y+18,20,kWhite);
     if(alert) {
         c.fillRect({x+20,y+54,w-40,1},rgba(255,255,255,24));
-        fonts.semibold.draw(c,d.disconnected?"Conexão perdida":"Vídeo parado",x+20,y+64,18,
+        fonts.semibold.draw(c,d.disconnected?uiText("Connection lost","Conexão perdida"):uiText("Video stalled","Vídeo parado"),x+20,y+64,18,
                            d.disconnected?rgba(255,205,116):rgba(255,151,137));
     }
 }
@@ -148,7 +152,7 @@ template<class T> void cycle(T& value,int dir,T lo,T hi,T step=T(1)) {
     while(next>high)next-=span;
     value=static_cast<T>(next);
 }
-const char* modeName(uint8_t v){return v==0?"Off":v==1?"On":"Alert";}
+const char* modeName(uint8_t v){return v==0?uiText("Off","Desligado"):v==1?uiText("On","Ligado"):uiText("Alert","Alerta");}
 }
 
 uint8_t streamStatsSettingsRowCount(uint8_t page){return page<6?kRowCounts[page]:0;}
@@ -158,26 +162,34 @@ uint8_t streamStatsSettingsNextRow(uint8_t page,uint8_t row,int direction){
 }
 std::string streamStatsSettingsLabel(const StreamStatsUiConfig& c,uint8_t page,uint8_t row){
     if(page>=6||row>=kRowCounts[page])return {};
-    constexpr const char* layout[]={"Formato","Posição","Subtítulos","Títulos","Cabeçalho","Escala","Tamanho da fonte"};
-    constexpr const char* spacing[]={"Altura de linha","Margem esquerda","Margem superior","Preenchimento","Fundo","Contorno"};
-    constexpr const char* visual[]={"Valores em destaque","Peso da fonte","Cor de destaque R","Cor de destaque G","Cor de destaque B"};
-    constexpr const char* network[]={"Latência","Bitrate","Perda","Latência: aviso","Latência: crítico","Perda: aviso","Perda: crítico"};
-    constexpr const char* video[]={"FPS","Decode","Quadros perdidos","Cadência"};
-    constexpr const char* limits[]={"FPS: aviso","FPS: crítico","Perdidos/s: aviso","Perdidos/s: crítico","Decode: aviso","Decode: crítico","Cadência: aviso","Cadência: crítico"};
-    if(page==1&&row==1)return c.alignRight?"Margem direita":"Margem esquerda";
-    if(page==1&&row==2)return c.alignBottom?"Margem inferior":"Margem superior";
-    const char* const* pages[]={layout,spacing,visual,network,video,limits};
-    return pages[page][row];
+    constexpr const char* layoutPt[]={"Formato","Posição","Subtítulos","Títulos","Cabeçalho","Escala","Tamanho da fonte"};
+    constexpr const char* layoutEn[]={"Format","Position","Subtitles","Titles","Header","Scale","Font size"};
+    constexpr const char* spacingPt[]={"Altura de linha","Margem esquerda","Margem superior","Preenchimento","Fundo","Contorno"};
+    constexpr const char* spacingEn[]={"Line height","Horizontal margin","Vertical margin","Padding","Background","Outline"};
+    constexpr const char* visualPt[]={"Valores em destaque","Peso da fonte","Cor de destaque R","Cor de destaque G","Cor de destaque B"};
+    constexpr const char* visualEn[]={"Highlighted values","Font weight","Accent color R","Accent color G","Accent color B"};
+    constexpr const char* networkPt[]={"Latência","Bitrate","Perda","Latência: aviso","Latência: crítico","Perda: aviso","Perda: crítico"};
+    constexpr const char* networkEn[]={"Latency","Bitrate","Loss","Latency: warning","Latency: critical","Loss: warning","Loss: critical"};
+    constexpr const char* videoPt[]={"FPS","Decode","Quadros perdidos","Cadência"};
+    constexpr const char* videoEn[]={"FPS","Decode","Dropped frames","Cadence"};
+    constexpr const char* limitsPt[]={"FPS: aviso","FPS: crítico","Perdidos/s: aviso","Perdidos/s: crítico","Decode: aviso","Decode: crítico","Cadência: aviso","Cadência: crítico"};
+    constexpr const char* limitsEn[]={"FPS: warning","FPS: critical","Drops/s: warning","Drops/s: critical","Decode: warning","Decode: critical","Cadence: warning","Cadence: critical"};
+    const bool pt=language()==Language::PortugueseBR;
+    if(page==1&&row==1)return c.alignRight?(pt?"Margem direita":"Right margin"):(pt?"Margem esquerda":"Left margin");
+    if(page==1&&row==2)return c.alignBottom?(pt?"Margem inferior":"Bottom margin"):(pt?"Margem superior":"Top margin");
+    const char* const* pagesPt[]={layoutPt,spacingPt,visualPt,networkPt,videoPt,limitsPt};
+    const char* const* pagesEn[]={layoutEn,spacingEn,visualEn,networkEn,videoEn,limitsEn};
+    return (pt?pagesPt[page]:pagesEn[page])[row];
 }
 std::string streamStatsSettingsValue(const StreamStatsUiConfig& c,uint8_t page,uint8_t row){
     if(page>=6||row>=kRowCounts[page])return {};
-    static const char* variants[]={"Cartão","Linhas","Denso"};
+    const char* variants[]={uiText("Card","Cartão"),uiText("Lines","Linhas"),uiText("Dense","Denso")};
     const SettingRef r=kRows[page][row];char b[32];
     switch(r.kind){
         case 0:
-            switch(r.index){case 0:return variants[c.variant];case 1:{static const char* positions[]={"Sup. esquerda","Sup. direita","Inf. esquerda","Inf. direita"};return positions[(c.alignBottom?2:0)+(c.alignRight?1:0)];}
-            case 2:return c.subtitles?"Ligado":"Desligado";case 3:return c.titles?"Ligado":"Desligado";
-            case 4:return c.header?"Ligado":"Desligado";case 5:std::snprintf(b,sizeof(b),"%u%%",c.scalePercent);return b;
+            switch(r.index){case 0:return variants[c.variant];case 1:{const char* positionsPt[]={"Sup. esquerda","Sup. direita","Inf. esquerda","Inf. direita"};const char* positionsEn[]={"Top left","Top right","Bottom left","Bottom right"};return (language()==Language::PortugueseBR?positionsPt:positionsEn)[(c.alignBottom?2:0)+(c.alignRight?1:0)];}
+            case 2:return c.subtitles?uiText("On","Ligado"):uiText("Off","Desligado");case 3:return c.titles?uiText("On","Ligado"):uiText("Off","Desligado");
+            case 4:return c.header?uiText("On","Ligado"):uiText("Off","Desligado");case 5:std::snprintf(b,sizeof(b),"%u%%",c.scalePercent);return b;
             default:std::snprintf(b,sizeof(b),"%u px",c.fontSize);return b;}
         case 1:
             switch(r.index){case 0:std::snprintf(b,sizeof(b),"%u%%",c.lineHeightPercent);return b;
@@ -185,7 +197,7 @@ std::string streamStatsSettingsValue(const StreamStatsUiConfig& c,uint8_t page,u
             case 3:std::snprintf(b,sizeof(b),"%u px",c.padding);return b;case 4:std::snprintf(b,sizeof(b),"%u%%",c.backgroundPercent);return b;
             default:std::snprintf(b,sizeof(b),"%u px",c.outlinePx);return b;}
         case 2:
-            switch(r.index){case 0:return c.accentText?"Acento":"Branco";case 1:return c.fontFace==0?"Inter regular":c.fontFace==1?"Inter semibold":"Inter bold";
+            switch(r.index){case 0:return c.accentText?uiText("Accent","Acento"):uiText("White","Branco");case 1:return c.fontFace==0?"Inter regular":c.fontFace==1?"Inter semibold":"Inter bold";
             case 2:std::snprintf(b,sizeof(b),"%u",c.accentR);return b;case 3:std::snprintf(b,sizeof(b),"%u",c.accentG);return b;
             default:std::snprintf(b,sizeof(b),"%u",c.accentB);return b;}
         case 3:
@@ -231,12 +243,12 @@ void drawStreamStatsUi(Canvas& c,Fonts& fonts,const StreamStatsUiConfig& cfg,con
     const Font& face=selectedFont(fonts,cfg);
     std::vector<Metric> all{
         {"fps","FPS",std::to_string(d.fps),cfg.subtitles?"":" FPS",fpsLevel(float(d.fps),cfg)},
-        {"rtt","Latência",d.rttMs<0?"—":std::to_string(d.rttMs)," ms",d.rttMs<0?Level::Ok:up(float(d.rttMs),cfg.rttWarn,cfg.rttBad)},
+        {"rtt",uiText("Latency","Latência"),d.rttMs<0?"—":std::to_string(d.rttMs)," ms",d.rttMs<0?Level::Ok:up(float(d.rttMs),cfg.rttWarn,cfg.rttBad)},
         {"br","Bitrate",number(d.bitrateMbps,2)," Mbps",Level::Ok},
-        {"loss","Perda",number(d.lossPercent),"%",up(d.lossPercent,cfg.lossWarnTenths/10.f,cfg.lossBadTenths/10.f)},
+        {"loss",uiText("Loss","Perda"),number(d.lossPercent),"%",up(d.lossPercent,cfg.lossWarnTenths/10.f,cfg.lossBadTenths/10.f)},
         {"dec","Decode",number(d.decodeMs)," ms",up(d.decodeMs,cfg.decodeWarn,cfg.decodeBad)},
-        {"drop","Perdidos",std::to_string(d.dropPerSecond),"/s",up(float(d.dropPerSecond),cfg.dropWarn,cfg.dropBad)},
-        {"cad","Cadência",d.fps?number(1000.f/d.fps)+" / "+number(1000.f/d.fps+d.jitterMs):"— / —"," ms",up(d.jitterMs,cfg.jitterWarn,cfg.jitterBad)}
+        {"drop",uiText("Drops","Perdidos"),std::to_string(d.dropPerSecond),"/s",up(float(d.dropPerSecond),cfg.dropWarn,cfg.dropBad)},
+        {"cad",uiText("Cadence","Cadência"),d.fps?number(1000.f/d.fps)+" / "+number(1000.f/d.fps+d.jitterMs):"— / —"," ms",up(d.jitterMs,cfg.jitterWarn,cfg.jitterBad)}
     };
     std::vector<const Metric*> chosen;
     for(size_t i=0;i<all.size();++i)
@@ -244,7 +256,7 @@ void drawStreamStatsUi(Canvas& c,Fonts& fonts,const StreamStatsUiConfig& cfg,con
     const bool card=cfg.variant==0;
     const bool fpsVisible=std::find(chosen.begin(),chosen.end(),&all[0])!=chosen.end();
     const bool head=card&&cfg.header;
-    const std::string title=d.disconnected?"Conexão perdida":d.stalled?"Vídeo parado":d.title;
+    const std::string title=d.disconnected?uiText("Connection lost","Conexão perdida"):d.stalled?uiText("Video stalled","Vídeo parado"):d.title;
     Color status=kGreen;
     for(const auto& metric:all)
         if(metric.level==Level::Bad) {status=kRed;break;}
@@ -256,7 +268,7 @@ void drawStreamStatsUi(Canvas& c,Fonts& fonts,const StreamStatsUiConfig& cfg,con
     std::vector<Row> rows;
     if(card) {
         for(int group=0;group<2;++group) {
-            Row row;row.heading=group==0?"REDE":"VÍDEO";
+            Row row;row.heading=group==0?uiText("WI-FI","WI-FI"):uiText("VIDEO","VÍDEO");
             for(auto* m:chosen) {
                 const std::string_view key=m->key;
                 const bool network=key=="rtt"||key=="br"||key=="loss";

@@ -2,6 +2,7 @@
 #include "xcloud_login.h"
 
 #include "xcloud/catalog.h"
+#include "ui/strings.h"
 #include "net/http.h"
 #include "platform/platform.h"
 #include "util/json.h"
@@ -58,7 +59,7 @@ bool loginXcloud(const xc::auth::XblToken& gssvXsts, XcloudLoginInfo& out, std::
     // this authenticated session, never restored from another account's cache.
     constexpr const char* cachePath = "/data/PSBOX/catalog-metadata-v1.json";
     const std::string market = out.market.empty() ? "US" : out.market;
-    constexpr const char* language = "en-us";
+    const std::string language = xc::ui::catalogLanguage();
     struct Metadata { std::string name, image; int64_t fetchedAt = 0; };
     std::map<std::string, Metadata> metadata;
     std::string cached;

@@ -1,11 +1,22 @@
 # Changelog
 
-## 0.1.1 — Development (Build 11)
+## 0.1.1 — Release candidate (Build 18)
 
-- Updated the PS4 library interface with recent and owned-game views, smoother catalog browsing and asynchronous artwork caching across app launches.
-- Added configurable FSR output targets and persisted stream settings.
-- Kept the previous library interface available as a build-time fallback.
-- Build 11 has been run on a PS4. Artwork cache writes are visible in the app logs; cache reuse after relaunch is still being confirmed. The library transition animation works in most cases but remains under review.
+- Added a persistent artwork cache and expanded the library with **My Games** and **Recent** views.
+- Added library localization with English as the default, plus Brazilian Portuguese, Spanish, French, German and Italian.
+- Improved controller navigation in title search and added Circle to cancel a pending game launch request.
+- Reduced the full PKG from 38,862,848 bytes (build 17) to 34,340,864 bytes (build 18), an 11.6% reduction. The smaller package was tested on a PS4; broader release review is still pending.
+- Package: `PSBOX-0.1.1-beta-b18.pkg`; title ID `PSBX00001`; installer version `00.03`.
+- This is a release candidate. It has not been published as a GitHub release yet. Binary distribution review for the exact external SDK/toolchain inputs remains open; see [LICENSE-STATUS.md](LICENSE-STATUS.md).
+
+## Português — 0.1.1 candidata (Build 18)
+
+- Adiciona cache persistente de artes e as abas **Meus jogos** e **Recentes**.
+- Adiciona idiomas à biblioteca: inglês padrão, português brasileiro, espanhol, francês, alemão e italiano.
+- Melhora a navegação por controle na busca de títulos e permite cancelar um pedido de início de jogo com Círculo.
+- Reduz o PKG completo de 38.862.848 bytes (build 17) para 34.340.864 bytes (build 18), uma redução de 11,6%. O pacote menor foi testado em um PS4; a revisão mais ampla da release ainda está pendente.
+- Pacote: `PSBOX-0.1.1-beta-b18.pkg`; identificador `PSBX00001`; versão do instalador `00.03`.
+- Esta é uma candidata à release e ainda não foi publicada no GitHub. A revisão de distribuição binária dos insumos externos exatos do SDK/toolchain continua pendente; consulte [LICENSE-STATUS.md](LICENSE-STATUS.md).
 
 ## 0.1.0 Beta — Build 1
 

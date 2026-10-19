@@ -6,12 +6,12 @@
 #include "network.h"
 #include "net/http.h"
 #include "xcloud_login.h"
-#include "ui/brand.h"
 #include "ui/canvas.h"
 #include "ui/font.h"
 #include "qrcodegen.h"
 #include "xcloud/gssv.h"
 #include "ui/app_ui.h"
+#include "ui/strings.h"
 #include "ui/image_cache.h"
 #include "video_decoder.h"
 #include "platform/ps4_build_info.h"
@@ -54,6 +54,35 @@ namespace {
 constexpr const char* kBuild = xc::ps4::kBuildLabel;
 constexpr const char* kLogDirectory = "/data/PSBOX";
 constexpr const char* kAppLogPath = "/data/PSBOX/xcloud.log";
+constexpr const char* kUiLanguagePath = "/data/PSBOX/ui-language.txt";
+void logLine(const char* fmt, ...);
+
+void loadUiLanguage() {
+    std::string code;
+    if (!xc::platform::readFile(kUiLanguagePath, code)) {
+        xc::ui::setLanguage(xc::ui::Language::English);
+        logLine("ui language defaulted to English; preference=missing");
+        return;
+    }
+    while (!code.empty() && (code.back() == '\n' || code.back() == '\r' || code.back() == ' ' || code.back() == '\t'))
+        code.pop_back();
+    const auto selected = xc::ui::languageFromCode(code);
+    xc::ui::setLanguage(selected);
+    logLine("ui language loaded code=%s", xc::ui::languageCode(selected));
+}
+
+bool saveUiLanguage(int selected) {
+    if (selected < 0 || selected >= static_cast<int>(xc::ui::Language::Count))
+        selected = static_cast<int>(xc::ui::Language::English);
+    const auto lang = static_cast<xc::ui::Language>(selected);
+    const std::string code = std::string(xc::ui::languageCode(lang)) + "\n";
+    if (!xc::platform::writeFileAtomic(kUiLanguagePath, code)) {
+        logLine("ui language save failed path=%s", kUiLanguagePath);
+        return false;
+    }
+    logLine("ui language saved code=%s", xc::ui::languageCode(lang));
+    return true;
+}
 
 void logLine(const char* fmt, ...) {
     char body[1536];
@@ -251,7 +280,8 @@ bool sameUiTiles(const std::vector<xc::ui::GameTile>& a, const std::vector<xc::u
         const auto& y = b[i];
         if (x.productId != y.productId || x.titleId != y.titleId || x.name != y.name ||
             x.tileUrl != y.tileUrl || x.heroUrl != y.heroUrl || x.playable != y.playable ||
-            x.purchasable != y.purchasable || x.freeInStore != y.freeInStore || x.accountOwned != y.accountOwned) return false;
+            x.purchasable != y.purchasable || x.freeInStore != y.freeInStore || x.accountOwned != y.accountOwned ||
+            x.myGamesEligible != y.myGamesEligible) return false;
     }
     return true;
 }
@@ -528,6 +558,7 @@ struct LoginState {
     std::deque<xc::stream::TextInputRequest> pendingTextInputs;
     std::deque<std::string> cancelledTextInputs;
     bool stopSessionRequested = false;
+    std::atomic<bool> cancelSessionRequested{false};
     bool streamTransportLost = false;
     std::string streamTier = "720";
     uint32_t streamBitrateCap = k720Bitrate;
@@ -582,6 +613,7 @@ struct LoginSnapshot {
     std::shared_ptr<const std::vector<xc::ui::GameTile>> uiTitles;
     size_t catalogTitleCount;
     std::string sessionMessage;
+    bool sessionCancelRequested;
     size_t selectedTitle;
     int expiresInSec;
     uint64_t generation;
@@ -633,7 +665,7 @@ LoginSnapshot snapshot(LoginState& state) {
     return {state.stage, state.verificationUri, state.verificationUriComplete, state.userCode, state.error,
             state.market, state.region, state.gamertag, state.visibleTitles, state.uiTitles,
             state.catalogTitleCount,
-            state.sessionMessage, state.selectedTitle,
+            state.sessionMessage, state.cancelSessionRequested.load(std::memory_order_acquire), state.selectedTitle,
             state.expiresInSec, state.generation, state.libraryLoading, state.libraryLoaded,
             state.libraryRevision, state.uiLibraryRevision, state.streamTransportLost, state.gpuVideoActive, state.streamTier,
             state.streamBitrateCap, state.streamRembEstimate, state.streamReceiveRate,
@@ -831,6 +863,26 @@ void* sessionWorker(void* opaque) {
     std::unique_ptr<SessionJob> job(static_cast<SessionJob*>(opaque));
     auto& state = *job->state;
     std::string error;
+    auto finishCanceledRequest = [&](bool remoteSessionMayExist, bool videoStarted) -> void* {
+        logLine("cloud session cancellation observed remote_may_exist=%d", remoteSessionMayExist ? 1 : 0);
+        if (videoStarted && job->video) job->video->stop();
+        if (remoteSessionMayExist && job->gssv) job->gssv->stopSession();
+        wipe(job->refreshToken);
+        resumeBackgroundOnExit.resume();
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.stage = LoginStage::Library;
+            state.sessionMessage.clear();
+            state.error.clear();
+            state.cancelSessionRequested.store(false, std::memory_order_release);
+            state.stopSessionRequested = false;
+            ++state.generation;
+        }
+        return nullptr;
+    };
+    auto cancelRequested = [&]() {
+        return state.cancelSessionRequested.load(std::memory_order_acquire);
+    };
     StreamProfile streamProfile = loadStreamProfile();
     logLine("session setup started title=%s title_id=%s", job->titleName.c_str(), job->titleId.c_str());
     if (job->gssv) {
@@ -839,7 +891,10 @@ void* sessionWorker(void* opaque) {
         logLine("cloud session profile requested=%s bitrate_cap=%u resolution_policy=user_selected_persistent",
                 tierLabel(streamProfile.tier), streamProfile.maxBitrate);
     }
-    if (!job->gssv || !job->gssv->startSession(job->titleId, "en-US", error)) {
+    if (cancelRequested()) return finishCanceledRequest(false, false);
+    const bool started = job->gssv && job->gssv->startSession(job->titleId, xc::ui::gameLocale(), error);
+    if (cancelRequested()) return finishCanceledRequest(true, false);
+    if (!started) {
         updateSession(state, LoginStage::Failed, {}, error.empty() ? "Could not start the cloud session." : error);
         logLine("session start failed: %s", error.c_str());
         wipe(job->refreshToken);
@@ -851,9 +906,12 @@ void* sessionWorker(void* opaque) {
     int pollErrors = 0;
     std::string lastRawState;
     for (int attempt = 0; attempt < 600; ++attempt) {
+        if (cancelRequested()) return finishCanceledRequest(true, false);
         xc::xcloud::SessionStatus status;
         error.clear();
-        if (!job->gssv->sessionState(status, error)) {
+        const bool gotStatus = job->gssv->sessionState(status, error);
+        if (cancelRequested()) return finishCanceledRequest(true, false);
+        if (!gotStatus) {
             if (++pollErrors >= 3) {
                 updateSession(state, LoginStage::Failed, {}, error);
                 logLine("session status failed after retries: %s", error.c_str());
@@ -861,7 +919,8 @@ void* sessionWorker(void* opaque) {
                 wipe(job->refreshToken);
                 return nullptr;
             }
-            sceKernelUsleep(1000000);
+            for (int wait = 0; wait < 10 && !cancelRequested(); ++wait) sceKernelUsleep(100000);
+            if (cancelRequested()) return finishCanceledRequest(true, false);
             continue;
         }
         pollErrors = 0;
@@ -887,16 +946,23 @@ void* sessionWorker(void* opaque) {
                 updateSession(state, LoginStage::SessionProvisioning, message);
             }
         } else if (status.state == xc::xcloud::SessionState::ReadyToConnect && !connected) {
+            if (cancelRequested()) return finishCanceledRequest(true, false);
             updateSession(state, LoginStage::SessionProvisioning, "Cloud host ready; completing console authorization...");
             xc::auth::MsaConfig config;
             xc::auth::MsaClient msa(std::move(config));
             xc::auth::MsaTokens transfer;
             if (!msa.refresh(job->refreshToken, transfer, error, kTransferScope)) {
+                if (cancelRequested()) return finishCanceledRequest(true, false);
                 updateSession(state, LoginStage::Failed, {}, "Console-transfer authorization failed: " + error);
                 logLine("console-transfer token request failed: %s", error.c_str());
                 job->gssv->stopSession();
                 wipe(job->refreshToken);
                 return nullptr;
+            }
+            if (cancelRequested()) {
+                wipe(transfer.accessToken);
+                wipe(transfer.refreshToken);
+                return finishCanceledRequest(true, false);
             }
             int cacheError = 0;
             if (!transfer.refreshToken.empty() && saveRefreshToken(transfer.refreshToken, cacheError)) {
@@ -906,7 +972,13 @@ void* sessionWorker(void* opaque) {
                 wipe(state.refreshToken);
                 state.refreshToken = transfer.refreshToken;
             }
-            if (!job->gssv->connect(transfer.accessToken, error)) {
+            const bool connectOk = job->gssv->connect(transfer.accessToken, error);
+            if (cancelRequested()) {
+                wipe(transfer.accessToken);
+                wipe(transfer.refreshToken);
+                return finishCanceledRequest(true, false);
+            }
+            if (!connectOk) {
                 wipe(transfer.accessToken);
                 wipe(transfer.refreshToken);
                 updateSession(state, LoginStage::Failed, {}, error);
@@ -920,6 +992,7 @@ void* sessionWorker(void* opaque) {
             connected = true;
             logLine("session connect authorization complete");
         } else if (status.state == xc::xcloud::SessionState::Provisioned) {
+            if (cancelRequested()) return finishCanceledRequest(true, false);
             updateSession(state, LoginStage::SessionProvisioning,
                           "Session ready; starting H.264 transport and PS4 decoder...");
             logLine("session provisioned; retaining session and starting WebRTC video");
@@ -927,7 +1000,9 @@ void* sessionWorker(void* opaque) {
             updateSession(state, LoginStage::SessionProvisioning,
                           "Initializing the PS4 H.264 decoder...");
             logLine("H.264 decoder initialization begin");
-            if (!job->video || !job->video->start()) {
+            const bool videoStarted = job->video && job->video->start();
+            if (cancelRequested()) return finishCanceledRequest(true, videoStarted);
+            if (!videoStarted) {
                 const std::string message = "PS4 Videodec2 initialization failed.";
                 logLine("video decoder initialization failed");
                 job->gssv->stopSession();
@@ -935,6 +1010,7 @@ void* sessionWorker(void* opaque) {
                 wipe(job->refreshToken);
                 return nullptr;
             }
+            if (cancelRequested()) return finishCanceledRequest(true, true);
             logLine("H.264 decoder initialization complete");
 
             auto audioPlayer = std::make_shared<xc::ps4::AudioPlayer>();
@@ -1004,10 +1080,19 @@ void* sessionWorker(void* opaque) {
             logLine("stream media config resolution=%sp remb_cap=%u decoder_max=1920x1088 adaptive=queue+decode+convert",
                     streamProfile.tier.c_str(), streamProfile.maxBitrate);
             xc::stream::StreamSession stream(*job->gssv, std::move(callbacks), std::move(streamOptions));
+            if (cancelRequested()) {
+                audioPlayer->stop();
+                return finishCanceledRequest(true, true);
+            }
             updateSession(state, LoginStage::SessionProvisioning,
                           "Negotiating H.264 video with the cloud console...");
             error.clear();
             if (!stream.start(error)) {
+                if (cancelRequested()) {
+                    stream.close();
+                    audioPlayer->stop();
+                    return finishCanceledRequest(true, true);
+                }
                 logLine("WebRTC start failed: %s", error.c_str());
                 stream.close();
                 job->video->stop();
@@ -1015,6 +1100,12 @@ void* sessionWorker(void* opaque) {
                 updateSession(state, LoginStage::Failed, {}, "Video transport failed: " + error);
                 wipe(job->refreshToken);
                 return nullptr;
+            }
+
+            if (cancelRequested()) {
+                stream.close();
+                audioPlayer->stop();
+                return finishCanceledRequest(true, true);
             }
 
             updateSession(state, LoginStage::Streaming,
@@ -2092,8 +2183,9 @@ void* sessionWorker(void* opaque) {
             }
             return nullptr;
         }
-        sceKernelUsleep(1000000);
+        for (int wait = 0; wait < 10 && !cancelRequested(); ++wait) sceKernelUsleep(100000);
     }
+    if (cancelRequested()) return finishCanceledRequest(true, false);
     job->gssv->stopSession();
     updateSession(state, LoginStage::Failed, {}, "Timed out while waiting for cloud session provisioning.");
     logLine("session provisioning timed out");
@@ -2356,8 +2448,16 @@ std::vector<xc::ui::GameTile> makeGameTiles(const LoginSnapshot& state) {
     return state.uiTitles ? *state.uiTitles : std::vector<xc::ui::GameTile>{};
 }
 
+bool titleHasMyGamesEvidence(const xc::xcloud::Title& title) {
+    // These fields decide which titles appear under My Games, not whether a
+    // session may be attempted. The service remains the launch authority.
+    return !title.titleId.empty() &&
+           (title.hasEntitlement || title.viaSubscription || title.isFreeToPlay);
+}
+
 std::vector<xc::ui::GameTile> makeGameTiles(const std::vector<xc::xcloud::Title>& titles) {
     std::vector<xc::ui::GameTile> tiles;
+    // Preserve every title returned by the service in the cloud catalog.
     tiles.reserve(titles.size());
     for (const auto& title : titles) {
         xc::ui::GameTile tile;
@@ -2368,6 +2468,7 @@ std::vector<xc::ui::GameTile> makeGameTiles(const std::vector<xc::xcloud::Title>
         tile.heroUrl = title.imageUrl;
         tile.playable = true;
         tile.freeInStore = title.isFreeInStore;
+        tile.myGamesEligible = titleHasMyGamesEvidence(title);
         // The API can prove an entitlement outside subscription programs, not every purchase.
         tile.accountOwned = title.hasEntitlement && !title.viaSubscription;
         tiles.push_back(std::move(tile));
@@ -2423,35 +2524,33 @@ void drawLoginScreen(xc::ui::Canvas& canvas, xc::ui::Fonts& fonts, const LoginSn
         canvas.drawImage(*banner, 0, 0);
         canvas.fillRect({0, 0, 1920, 1080}, rgba(0, 0, 0, 145));
         canvas.gradientH({0, 0, 1920, 1080}, rgba(0, 0, 0, 140), rgba(0, 0, 0, 0));
-    } else {
-        drawBrandMark(canvas, 1430.0f, 450.0f, 170.0f, rgba(238, 239, 236));
     }
     fonts.bold.draw(canvas, "PSBOX", 150, 235, 68, rgba(255, 255, 255));
     fonts.regular.draw(canvas, kBuild, 150, 300, 19, rgba(174, 188, 174));
     canvas.fillRect({150, 345, 82, 8}, rgba(168, 196, 207), 4);
     const bool inLibrary = s.stage == LoginStage::Library || s.stage == LoginStage::SessionStarting ||
                            s.stage == LoginStage::SessionProvisioning || s.stage == LoginStage::SessionReady;
-    fonts.semibold.draw(canvas, inLibrary ? "Choose a cloud game" : "Sign in with your Microsoft account",
+    fonts.semibold.draw(canvas, inLibrary ? tr(Str::TabGamePass) : tr(Str::SignInTitle),
                         150, 415, 34, rgba(238, 238, 238));
 
     switch (s.stage) {
         case LoginStage::Starting:
-            fonts.regular.draw(canvas, "Requesting a secure sign-in code...", 150, 510, 27, rgba(190, 210, 190));
+            fonts.regular.draw(canvas, tr(Str::RequestingCode), 150, 510, 27, rgba(190, 210, 190));
             break;
         case LoginStage::CheckingSaved:
-            fonts.regular.draw(canvas, "Checking for a saved Microsoft account...", 150, 510, 27,
+            fonts.regular.draw(canvas, tr(Str::SigningIn), 150, 510, 27,
                                rgba(190, 210, 190));
             break;
         case LoginStage::Refreshing:
-            fonts.regular.draw(canvas, "Refreshing your saved Microsoft sign-in...", 150, 510, 27,
+            fonts.regular.draw(canvas, tr(Str::SigningIn), 150, 510, 27,
                                rgba(190, 210, 190));
             break;
         case LoginStage::ShowingCode:
-            fonts.regular.draw(canvas, "On your phone or computer, open:", 150, 500, 26, rgba(205, 215, 205));
+            fonts.regular.draw(canvas, tr(Str::SignInStep1), 150, 500, 26, rgba(205, 215, 205));
             fonts.semibold.draw(canvas, s.verificationUri.c_str(), 150, 550, 34, rgba(140, 235, 145));
-            fonts.regular.draw(canvas, "Enter this code:", 150, 640, 25, rgba(205, 215, 205));
+            fonts.regular.draw(canvas, tr(Str::SignInStep2), 150, 640, 25, rgba(205, 215, 205));
             fonts.bold.draw(canvas, s.userCode.c_str(), 150, 690, 66, rgba(255, 255, 255));
-            fonts.regular.draw(canvas, "Waiting for approval. Keep this screen open.", 150, 785, 24, rgba(190, 200, 190));
+            fonts.regular.draw(canvas, tr(Str::SignInWaiting), 150, 785, 24, rgba(190, 200, 190));
             if (!s.verificationUriComplete.empty()) {
                 constexpr int maxVersion = 10;
                 constexpr int quietZone = 4;
@@ -2482,20 +2581,20 @@ void drawLoginScreen(xc::ui::Canvas& canvas, xc::ui::Fonts& fonts, const LoginSn
                             }
                         }
                     }
-                    fonts.regular.draw(canvas, "Scan with your phone", x0, y0 + side + 22,
+                    fonts.regular.draw(canvas, tr(Str::SignInScan), x0, y0 + side + 22,
                                        23, rgba(210, 220, 210));
                 }
             }
             break;
         case LoginStage::XboxLive:
-            fonts.semibold.draw(canvas, "Connecting to your gaming account...", 150, 535, 34, rgba(140, 235, 145));
-            fonts.regular.draw(canvas, "Authorizing your gaming profile.", 150, 590, 25,
+            fonts.semibold.draw(canvas, tr(Str::Connecting), 150, 535, 34, rgba(140, 235, 145));
+            fonts.regular.draw(canvas, tr(Str::SigningIn), 150, 590, 25,
                                rgba(205, 215, 205));
             break;
         case LoginStage::Xcloud:
-            fonts.semibold.draw(canvas, "Connecting to the streaming service...", 150, 535, 34,
+            fonts.semibold.draw(canvas, tr(Str::Connecting), 150, 535, 34,
                                 rgba(140, 235, 145));
-            fonts.regular.draw(canvas, "Checking xCloud access and available region.", 150, 590, 25,
+            fonts.regular.draw(canvas, tr(Str::StartingStream), 150, 590, 25,
                                rgba(205, 215, 205));
             break;
         case LoginStage::Library: {
@@ -2545,9 +2644,12 @@ void drawLoginScreen(xc::ui::Canvas& canvas, xc::ui::Fonts& fonts, const LoginSn
                 fonts.regular.draw(canvas, name.c_str(), 150, 590, 27, rgba(235, 240, 235));
             }
             fonts.regular.draw(canvas, s.sessionMessage.c_str(), 150, 650, 23, rgba(205, 215, 205));
-            if (s.stage == LoginStage::SessionProvisioning)
+            if (s.stage == LoginStage::SessionProvisioning && !s.sessionCancelRequested)
                 fonts.regular.draw(canvas, "Detailed transport steps are also recorded in the PS4 klog.",
                                    150, 710, 21, rgba(165, 190, 165));
+            if (s.sessionCancelRequested)
+                fonts.regular.draw(canvas, "Canceling the cloud request; waiting for the current network step to finish.",
+                                   150, 710, 21, rgba(255, 205, 116));
             if (s.stage == LoginStage::SessionReady)
                 fonts.regular.draw(canvas, "Press Circle to return to the library.", 150, 715, 22,
                                    rgba(190, 200, 190));
@@ -2586,7 +2688,7 @@ void drawLoginScreen(xc::ui::Canvas& canvas, xc::ui::Fonts& fonts, const LoginSn
                          s.stage == LoginStage::SessionStopping ? "Closing session; please wait" :
                          s.stage == LoginStage::Failed && !titles.empty() ? "Circle: return to library" :
                          s.stage == LoginStage::SessionProvisioning || s.stage == LoginStage::SessionStarting
-                             ? "Keep the app open while the cloud session is prepared" :
+                             ? (s.sessionCancelRequested ? "Canceling request..." : "Circle: cancel cloud game request") :
                                "PS4 network: Microsoft account + streaming HTTPS";
     fonts.regular.draw(canvas, footer, 180, 923, 21,
                        rgba(190, 205, 190));
@@ -2634,6 +2736,7 @@ bool beginCloudSession(LoginState& state, const xc::ui::GameTile& game,
     auto* job = new SessionJob{&state, state.gssv, game.titleId, state.refreshToken, game.name, video, controller};
     state.stage = LoginStage::SessionStarting;
     state.stopSessionRequested = false;
+    state.cancelSessionRequested.store(false, std::memory_order_release);
     state.sessionMessage = "Contacting the cloud session service...";
     state.error.clear();
     for (size_t i = 0; state.visibleTitles && i < state.visibleTitles->size(); ++i) {
@@ -3053,6 +3156,10 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
             }
         }
         const auto event = context.ps5Ui->handle(nav);
+        if (event.action == xc::ui::Action::SettingsChanged) {
+            saveUiLanguage(event.settings.language);
+            logLine("catalog and game locale will use the selected language on the next app launch/session");
+        }
         if (event.action == xc::ui::Action::Play) {
             context.ps5Ui->recordRecentGame(event.game);
             // Retain already-resident artwork before HTTP is paused for Play.
@@ -3060,6 +3167,7 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
             context.loadingBanner = context.imageCache && !event.game.heroUrl.empty()
                 ? context.imageCache->get(event.game.heroUrl, 1920, 1080, xc::ui::ImagePriority::Hero)
                 : nullptr;
+            // GSSV session creation decides whether this title can actually start.
             beginCloudSession(*context.state, event.game, context.video, context.controller);
         }
         if (context.ps5Ui->needsRedraw(now)) {
@@ -3134,6 +3242,28 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
         }
     }
 
+    if ((state.stage == LoginStage::SessionStarting || state.stage == LoginStage::SessionProvisioning) && nav.back) {
+        bool requested = false;
+        {
+            std::lock_guard<std::mutex> lock(context.state->mutex);
+            if ((context.state->stage == LoginStage::SessionStarting ||
+                 context.state->stage == LoginStage::SessionProvisioning) &&
+                !context.state->cancelSessionRequested.load(std::memory_order_acquire)) {
+                context.state->cancelSessionRequested.store(true, std::memory_order_release);
+                context.state->sessionMessage = "Canceling cloud game request...";
+                ++context.state->generation;
+                requested = true;
+            }
+        }
+        if (requested) {
+            state = snapshot(*context.state);
+            logLine("cloud session cancel requested input=circle stage=%s", loginStageName(state.stage));
+            drawLoginScreen(*context.canvas, *context.fonts, state, context.loadingBanner.get());
+            context.lastGeneration = state.generation;
+            return {true, false, false, gpuVideoEnabled ? context.canvas : nullptr};
+        }
+    }
+
     if (state.generation == context.lastGeneration)
         return {false, false, false, gpuVideoEnabled ? context.canvas : nullptr};
     drawLoginScreen(*context.canvas, *context.fonts, state, context.loadingBanner.get());
@@ -3173,6 +3303,7 @@ int main() {
         sceKernelDebugOutText(0, "log directory /data/PSBOX is unavailable\n");
     }
     logLine("log_file=%s", kAppLogPath);
+    loadUiLanguage();
     xc::ps4::setVideoDiagnosticSink([](const char* message) {
         logLine("[XCLOUD-PS4-VIDEO] %s", message);
     });
@@ -3216,6 +3347,9 @@ int main() {
     xc::ui::ImageCache images([&] { if (appUiPtr) appUiPtr->invalidate(); },
                               2ull << 30, "/data/PSBOX/image-cache-v2", 512u << 20);
     xc::ui::AppUi appUi(fonts, images);
+    xc::ui::SettingsChoice initialUiSettings;
+    initialUiSettings.language = static_cast<int>(xc::ui::language());
+    appUi.setSettings(initialUiSettings);
     appUi.setQtLibraryUi(PSBOX_DEFAULT_NEW_LIBRARY_UI != 0);
     appUiPtr = &appUi;
     DrawContext draw{&canvas, &fonts, &state, &controller, &appUi, &videoDecoder};

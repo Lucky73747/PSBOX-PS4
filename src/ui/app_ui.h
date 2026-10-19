@@ -37,8 +37,8 @@ struct GameTile {
     std::string tileUrl;
     std::string heroUrl;
     std::vector<std::string> categories;
-    // False once the account's titles are known and this one isn't among
-    // them (bought separately, or not in the subscription).
+    // UI hint/ordering metadata retained for other catalog sources. PS4 cloud
+    // session attempts are allowed through to the service for final approval.
     bool playable = true;
     // Not playable, but streams in the cloud once bought.
     bool purchasable = false;
@@ -59,6 +59,9 @@ struct GameTile {
     std::vector<FriendPlaying> friends;
     // GSSV entitlement independent of a subscription; not a complete purchase inventory.
     bool accountOwned = false;
+    // Access evidence used only to populate the PS4 "My games" view. It is not
+    // a launch authorization: session creation is the server's decision.
+    bool myGamesEligible = false;
 };
 
 // One of the user's own consoles, as "My consoles" shows it.
@@ -290,7 +293,6 @@ private:
     // there: never another game's art in the meantime.
     bool drawHero(Canvas& c, uint64_t nowMs, const std::string& url, bool details);
     void drawTopBar(Canvas& c);
-    void drawLogo(Canvas& c, float cx, float cy, float r);
     void drawHints(Canvas& c, const std::vector<std::pair<int, const char*>>& hints);
     void drawSpinner(Canvas& c, float cx, float cy, float r, uint64_t nowMs);
     void drawToast(Canvas& c, uint64_t nowMs);
@@ -329,6 +331,8 @@ private:
     void setRowsLocked(std::vector<GameRow> rows);
     // Hides / shows a game; fills `ev` so the app saves it.
     void toggleHidden(const GameTile& tile, UiEvent& ev);
+    // Removes one entry from this run's Recent tab without hiding the title.
+    void removeRecentGame(const GameTile& tile);
     void prefsEvent(UiEvent& ev) const;
     // The filter buttons of the current tab's search.
     // The search's filters, in two rows: Free, Lowest price (in "Your games"

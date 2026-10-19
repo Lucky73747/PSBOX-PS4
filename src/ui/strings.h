@@ -221,6 +221,20 @@ enum class Str {
     CloudCatalog,
     OwnedGames,
     OwnedGamesHint,
+    RecentTab,
+    Details,
+    SelectGameHint,
+    NoRecentGames,
+    GamesPerRow,       // "%s" = number of cards
+    FilterLabel,
+    RefreshConsoles,
+    Console,           // generic fallback for an unnamed console
+    StartRemotePlay,
+    AvailableConsoles,
+    ConsoleSearchStatus,
+    SetupGuide,
+    RemoveRecent,
+    RecentRemovedToast,
     Count
 };
 

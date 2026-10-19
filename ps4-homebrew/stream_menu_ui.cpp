@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "stream_menu_ui.h"
+#include "ui/strings.h"
 
 #include <algorithm>
 #include <array>
@@ -9,6 +10,9 @@
 namespace xc::ps4 {
 namespace {
 using namespace xc::ui;
+const char* uiText(const char* en, const char* pt) {
+    return language() == Language::PortugueseBR ? pt : en;
+}
 constexpr Color kText = rgba(238, 239, 236), kMuted = rgba(177, 181, 177);
 constexpr Color kAccent = rgba(168, 196, 207), kOnAccent = rgba(23, 33, 38);
 constexpr Color kPanel = rgba(24, 27, 25), kCard = rgba(31, 34, 32);
@@ -238,16 +242,16 @@ struct Panel {
 };
 void image(Panel& p) {
     const auto& s=p.state;
-    static const char* res[]{"720p","1080p"}, *fps[]{"30","60"}, *filter[]{"Bilinear","FSR 1","Nativo"};
-    p.group("Qualidade",2);
-    p.segments("Resolução",res,2,s.requestedTier=="1080",0,16);
-    p.segments("Taxa de quadros",fps,2,s.fps==60,2,18);
-    static const char* bw[]{"3","10","30",""};
+    const char* res[]{"720p","1080p"}, *fps[]{"30","60"}, *filter[]{"Bilinear","FSR 1",uiText("Native", "Nativo")};
+    p.group(uiText("Quality", "Qualidade"),2);
+    p.segments(uiText("Resolution", "Resolução"),res,2,s.requestedTier=="1080",0,16);
+    p.segments(uiText("Frame rate", "Taxa de quadros"),fps,2,s.fps==60,2,18);
+    const char* bw[]{"3","10","30",""};
     int selected=!s.bitrateCustom ? (s.bitrate==3000000?0:s.bitrate==10000000?1:2) : 3;
-    p.group("Rede",s.bitrateCustom?2:1);
-    p.segments("Limite de banda",bw,4,selected,kBitratePresetRow,20,"Mbps");
+    p.group(uiText("Network", "Rede"),s.bitrateCustom?2:1);
+    p.segments(uiText("Bitrate cap", "Limite de banda"),bw,4,selected,kBitratePresetRow,20,"Mbps");
     if(s.bitrateCustom) {
-        const float top=p.row("Personalizado",1);
+        const float top=p.row(uiText("Custom", "Personalizado"),1);
         p.p.fill(151,top+27,115,6,rgba(62,66,63),3);
         const float fill=std::clamp((s.bitrate/1000000.0f-3)/27,0.0f,1.0f)*115;
         if(fill>0) p.p.fill(151,top+27,fill,6,kAccent,3);
@@ -255,20 +259,20 @@ void image(Panel& p) {
         char val[24]; std::snprintf(val,sizeof(val),"%.0f Mbps",s.bitrate/1000000.0);
         p.p.text(val,354-p.p.measure(val,14,true),top+21,14,kText,true);
     }
-    p.group("Aprimoramento",1);
+    p.group(uiText("Enhancement", "Aprimoramento"),1);
     padButton(p.p,PadButton::Triangle,338,p.y-22,18);
-    p.segments("Escala de saída",filter,3,std::min(s.upscaler,2u),4,22);
+    p.segments(uiText("Output scaling", "Escala de saída"),filter,3,std::min(s.upscaler,2u),4,22);
 }
 void fsr(Panel& p, int outputWidth, int outputHeight) {
     const auto& s=p.state;
-    static const char* filters[]{"Bilinear","FSR 1","Nativo"};
-    p.group("Nitidez RCAS",1,86);
+    const char* filters[]{"Bilinear","FSR 1",uiText("Native", "Nativo")};
+    p.group(uiText("RCAS sharpness", "Nitidez RCAS"),1,86);
     const float sharpnessY=p.row("",0,86);
     const uint32_t sharpnessLevel=std::min(s.rcasSharpness,4u);
     const uint32_t sharpnessPercent=(4u-sharpnessLevel)*25u;
     constexpr float sharpnessX=126.0f, sharpnessWidth=188.0f;
     char sharpnessText[16];std::snprintf(sharpnessText,sizeof(sharpnessText),"%u%%",sharpnessPercent);
-    p.p.text("Força",26,sharpnessY+10,12,kMuted);
+    p.p.text(uiText("Strength", "Força"),26,sharpnessY+10,12,kMuted);
     p.p.text(sharpnessText,354-p.p.measure(sharpnessText,15,true),sharpnessY+8,15,kText,true);
     const float trackY=sharpnessY+39;
     p.p.fill(sharpnessX,trackY-4,sharpnessWidth,8,rgba(62,66,63),4);
@@ -282,22 +286,22 @@ void fsr(Panel& p, int outputWidth, int outputHeight) {
     p.p.circle(thumbX,trackY,10,rgba(20,23,22));
     p.p.circle(thumbX,trackY,8,kText);
     p.p.circle(thumbX,trackY,10,kAccent,true);
-    p.p.text("Suave",sharpnessX,sharpnessY+57,10,kMuted);
-    p.p.text("Forte",sharpnessX+sharpnessWidth-p.p.measure("Forte",10),sharpnessY+57,10,kMuted);
+    p.p.text(uiText("Soft", "Suave"),sharpnessX,sharpnessY+57,10,kMuted);
+    p.p.text(uiText("Strong", "Forte"),sharpnessX+sharpnessWidth-p.p.measure(uiText("Strong", "Forte"),10),sharpnessY+57,10,kMuted);
     const bool fsrEnabled = s.upscaler == 1;
     const uint32_t targetHeight = s.fsrTargetHeight == 1440 || s.fsrTargetHeight == 2160 ? s.fsrTargetHeight : 1080;
-    p.group("Alvo EASU experimental",1);
+    p.group(uiText("Experimental EASU target", "Alvo EASU experimental"),1);
     const char* target = targetHeight == 2160 ? "2160p (4K)" : targetHeight == 1440 ? "1440p" : "1080p";
-    p.value("Resolução EASU",target,1);
-    p.group("Processamento",1);
-    p.segments("Escala de saída",filters,3,std::min(s.upscaler,2u),2,22);
+    p.value(uiText("EASU resolution", "Resolução EASU"),target,1);
+    p.group(uiText("Processing", "Processamento"),1);
+    p.segments(uiText("Output scaling", "Escala de saída"),filters,3,std::min(s.upscaler,2u),2,22);
     if(s.fsrExperimentalUnlocked) {
-        p.group("Experimental",1); p.value("RCAS nativo 1080p",s.nativeRcas?"Ativo":"Desativado",3);
+        p.group(uiText("Experimental", "Experimental"),1); p.value(uiText("Native RCAS 1080p", "RCAS nativo 1080p"),s.nativeRcas?uiText("Enabled", "Ativo"):uiText("Disabled", "Desativado"),3);
     }
     p.y+=9;
     p.p.fill(14,p.y,352,58,kCard,10);
     p.p.stroke(14,p.y,352,58,rgba(49,52,50),1,10);
-    p.p.text("Efeito na imagem",26,p.y+7,11,kMuted,true);
+    p.p.text(uiText("Image effect", "Efeito na imagem"),26,p.y+7,11,kMuted,true);
     char effect[64]{};
     char detail[80]{};
     const uint32_t sourceWidth=s.width, sourceHeight=s.height;
@@ -309,48 +313,48 @@ void fsr(Panel& p, int outputWidth, int outputHeight) {
     const bool targetPass=hasFrame&&targetWidth>static_cast<uint32_t>(std::max(outputWidth,0))&&
         targetHeight>static_cast<uint32_t>(std::max(outputHeight,0))&&targetWidth>=sourceWidth&&targetHeight>=sourceHeight;
     if(!s.gpuVideoActive) {
-        std::snprintf(effect,sizeof(effect),"GPU de vídeo inativa");
-        std::snprintf(detail,sizeof(detail),"FSR 1 selecionado, sem efeito no fallback");
+        std::snprintf(effect,sizeof(effect),"%s",uiText("Video GPU inactive", "GPU de vídeo inativa"));
+        std::snprintf(detail,sizeof(detail),"%s",uiText("FSR 1 selected; no effect in CPU fallback", "FSR 1 selecionado, sem efeito no fallback"));
     } else if(!fsrEnabled) {
-        std::snprintf(effect,sizeof(effect),"%s selecionado",s.upscaler==2?"Nativo":"Bilinear");
-        std::snprintf(detail,sizeof(detail),"FSR 1 está desligado");
+        std::snprintf(effect,sizeof(effect),uiText("%s selected", "%s selecionado"),s.upscaler==2?uiText("Native", "Nativo"):"Bilinear");
+        std::snprintf(detail,sizeof(detail),"%s",uiText("FSR 1 is off", "FSR 1 está desligado"));
     } else if(!hasFrame) {
-        std::snprintf(effect,sizeof(effect),"FSR 1 selecionado");
-        std::snprintf(detail,sizeof(detail),"Aguardando o primeiro quadro de vídeo");
+        std::snprintf(effect,sizeof(effect),"%s",uiText("FSR 1 selected", "FSR 1 selecionado"));
+        std::snprintf(detail,sizeof(detail),"%s",uiText("Waiting for the first video frame", "Aguardando o primeiro quadro de vídeo"));
     } else if(targetPass) {
-        std::snprintf(effect,sizeof(effect),"Alvo %up · experimental",targetHeight);
-        std::snprintf(detail,sizeof(detail),"Caminho GPU efetivo: gpu_scaler no Klog");
+        std::snprintf(effect,sizeof(effect),uiText("Target %up · experimental", "Alvo %up · experimental"),targetHeight);
+        std::snprintf(detail,sizeof(detail),"%s",uiText("Effective GPU path: gpu_scaler in Klog", "Caminho GPU efetivo: gpu_scaler no Klog"));
     } else if(directUpscale) {
-        std::snprintf(effect,sizeof(effect),"EASU + RCAS ativos");
-        std::snprintf(detail,sizeof(detail),"%ux%u ampliado para %up",sourceWidth,sourceHeight,outputHeight);
+        std::snprintf(effect,sizeof(effect),"%s",uiText("EASU + RCAS active", "EASU + RCAS ativos"));
+        std::snprintf(detail,sizeof(detail),uiText("%ux%u upscaled to %up", "%ux%u ampliado para %up"),sourceWidth,sourceHeight,outputHeight);
     } else if(s.nativeRcas&&s.requestedTier=="1080"&&sourceWidth==1920&&sourceHeight==1080&&
               outputWidth==1920&&outputHeight==1080) {
-        std::snprintf(effect,sizeof(effect),"RCAS nativo ativo · experimental");
-        std::snprintf(detail,sizeof(detail),"EASU não amplia vídeo já em 1080p");
+        std::snprintf(effect,sizeof(effect),"%s",uiText("Native RCAS active · experimental", "RCAS nativo ativo · experimental"));
+        std::snprintf(detail,sizeof(detail),"%s",uiText("EASU does not upscale video already at 1080p", "EASU não amplia vídeo já em 1080p"));
     } else {
-        std::snprintf(effect,sizeof(effect),"Sem escala nesta resolução");
-        std::snprintf(detail,sizeof(detail),"%ux%u → %dx%d; EASU/RCAS não processam",sourceWidth,sourceHeight,outputWidth,outputHeight);
+        std::snprintf(effect,sizeof(effect),"%s",uiText("No scaling at this resolution", "Sem escala nesta resolução"));
+        std::snprintf(detail,sizeof(detail),uiText("%ux%u → %dx%d; EASU/RCAS are inactive", "%ux%u → %dx%d; EASU/RCAS não processam"),sourceWidth,sourceHeight,outputWidth,outputHeight);
     }
     p.p.text(effect,26,p.y+22,13,kText,true);
     p.p.text(detail,26,p.y+40,10,kMuted);
 }
 void controls(Panel& p) {
-    p.group("Atalhos do controle",6);
-    float y=p.row("Selecionar / confirmar",-1);padButton(p.p,PadButton::Cross,323,y+15);
-    y=p.row("Voltar / cancelar",-1);padButton(p.p,PadButton::Circle,323,y+15);
-    y=p.row("Abrir menu (0,7 s)",-1); padButton(p.p,PadButton::Options,321,y+15);
-    y=p.row("Trocar painel",-1);
+    p.group(uiText("Controller shortcuts", "Atalhos do controle"),6);
+    float y=p.row(uiText("Select / confirm", "Selecionar / confirmar"),-1);padButton(p.p,PadButton::Cross,323,y+15);
+    y=p.row(uiText("Back / cancel", "Voltar / cancelar"),-1);padButton(p.p,PadButton::Circle,323,y+15);
+    y=p.row(uiText("Open menu (0.7 s)", "Abrir menu (0,7 s)"),-1); padButton(p.p,PadButton::Options,321,y+15);
+    y=p.row(uiText("Switch panel", "Trocar painel"),-1);
     padButton(p.p,PadButton::L1,280,y+15);padButton(p.p,PadButton::R1,323,y+15);
-    y=p.row("Guide",-1);padButton(p.p,PadButton::Touchpad,313,y+13);
-    y=p.row("Cartão vermelho: encerrar",-1);
+    y=p.row(uiText("Guide", "Guia"),-1);padButton(p.p,PadButton::Touchpad,313,y+13);
+    y=p.row(uiText("Red card: end session", "Cartão vermelho: encerrar"),-1);
     padButton(p.p,PadButton::Cross,323,y+15);
 }
 
 void volume(Panel& p) {
-    p.group("Saída",1);
-    p.p.text("Mutar",292,p.y-16,11,kMuted);
+    p.group(uiText("Output", "Saída"),1);
+    p.p.text(uiText("Mute", "Mutar"),292,p.y-16,11,kMuted);
     padButton(p.p,PadButton::Triangle,338,p.y-22,18);
-    if(!p.state.audioAvailable) {p.row("Áudio indisponível nesta sessão",-1);return;}
+    if(!p.state.audioAvailable) {p.row(uiText("Audio unavailable in this session", "Áudio indisponível nesta sessão"),-1);return;}
     const uint32_t currentVolume=std::min(p.state.volume,100u);
     const float y=p.row("",-1);
     p.p.fill(26,y+11,38,38,rgba(43,46,44),10);
@@ -363,20 +367,20 @@ void volume(Panel& p) {
     p.p.text(text,354-p.p.measure(text,15,true),y+21,15,kText,true);
 }
 void configuration(Panel& p) {
-    static const char* stats[]{"Oculta","Compacta","Completa"};
-    static const char* layouts[]{"Cartão","Linhas","Denso"};
-    p.group("Na tela",3,60,29);
-    p.segments("Estatísticas",stats,3,std::min<int>(p.state.statsMode,2),6,26,nullptr,true);
-    p.segments("Formato OSD",layouts,3,std::min<int>(p.state.statsUiConfig.variant,2),7,48);
-    const float configureY=p.row("Configurar OSD",8);
+    const char* stats[]{uiText("Hidden", "Oculta"),uiText("Compact", "Compacta"),uiText("Full", "Completa")};
+    const char* layouts[]{uiText("Card", "Cartão"),uiText("Lines", "Linhas"),uiText("Dense", "Denso")};
+    p.group(uiText("On screen", "Na tela"),3,60,29);
+    p.segments(uiText("Statistics", "Estatísticas"),stats,3,std::min<int>(p.state.statsMode,2),6,26,nullptr,true);
+    p.segments(uiText("OSD layout", "Formato OSD"),layouts,3,std::min<int>(p.state.statsUiConfig.variant,2),7,48);
+    const float configureY=p.row(uiText("Configure OSD", "Configurar OSD"),8);
     padButton(p.p,PadButton::Cross,323,configureY+15);
     // Existing diagnostic actions remain accessible; future controller options stay pending.
-    p.group("Diagnóstico",2);
-    p.value("Quadro apresentado",p.state.frameWait?"+1 quadro":"Mais recente",5);
-    p.value("Reset automático",p.state.automaticReset?"Ativo":"Desativado",3);
+    p.group(uiText("Diagnostics", "Diagnóstico"),2);
+    p.value(uiText("Displayed frame", "Quadro apresentado"),p.state.frameWait?uiText("+1 frame", "+1 quadro"):uiText("Newest", "Mais recente"),5);
+    p.value(uiText("Automatic reset", "Reset automático"),p.state.automaticReset?uiText("Enabled", "Ativo"):uiText("Disabled", "Desativado"),3);
 }
 void statsSettings(Panel& p) {
-    static const char* pages[]={"Layout","Espaçamento","Visual","Rede","Vídeo","Limites"};
+    const char* pages[]={uiText("Layout", "Layout"),uiText("Spacing", "Espaçamento"),uiText("Visual", "Visual"),uiText("Network", "Rede"),uiText("Video", "Vídeo"),uiText("Limits", "Limites")};
     const uint8_t page=std::min<uint8_t>(p.state.statsSettingsPage,5);
     char heading[64];std::snprintf(heading,sizeof(heading),"%s  ·  %u/6",pages[page],unsigned(page+1));
     const uint8_t count=streamStatsSettingsRowCount(page);
@@ -392,9 +396,9 @@ void statsSettings(Panel& p) {
     }
     const float footerY=p.y+12;
     padButton(p.p,PadButton::Cross,18,footerY,20);
-    p.p.text("Salvar",44,footerY+3,12,kMuted);
+    p.p.text(uiText("Save", "Salvar"),44,footerY+3,12,kMuted);
     padButton(p.p,PadButton::Circle,112,footerY,20);
-    p.p.text("Voltar",138,footerY+3,12,kMuted);
+    p.p.text(uiText("Back", "Voltar"),138,footerY+3,12,kMuted);
 }
 float height(unsigned card,const StreamMenuUiState& s) {
     if(card==4) return 150;
@@ -481,10 +485,10 @@ void drawStreamMenuUi(Canvas& c,Fonts& f,const StreamMenuUiState& s,uint64_t now
         if(i==0) {if(pane.fsrSettingsOpen) fsr(p,c.width(),c.height());else image(p);}
         else if(i==1) controls(p); else if(i==2) volume(p);
         else if(i==4) {
-            p.group("Encerrar sessão cloud",1);
-            const float y=p.row("Confirmar saída",0);
+            p.group(uiText("End cloud session", "Encerrar sessão cloud"),1);
+            const float y=p.row(uiText("Confirm exit", "Confirmar saída"),0);
             padButton(p.p,PadButton::Cross,323,y+15);
-            p.p.text("O jogo será desconectado.",18,p.y+12,13,kMuted);
+            p.p.text(uiText("The game will be disconnected.", "O jogo será desconectado."),18,p.y+12,13,kMuted);
         }
         else if(pane.statsSettingsOpen) statsSettings(p); else configuration(p);
         c.resetClip();

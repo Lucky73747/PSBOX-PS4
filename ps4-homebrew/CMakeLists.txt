@@ -21,6 +21,8 @@ endif()
 if(NOT PSBOX_BUILD_NUMBER MATCHES "^[0-9]+$")
   message(FATAL_ERROR "PSBOX_BUILD_NUMBER must be numeric")
 endif()
+option(PSBOX_EXPERIMENTAL_LINK_GC_SECTIONS
+  "Discard unreferenced code/data sections from the statically linked PS4 app" OFF)
 
 if(NOT PS4 OR NOT ORBIS_COMPAT_DIR)
   message(FATAL_ERROR "Use the paired orbis-sdk.cmake toolchain; this target must not build as a host app")
@@ -122,7 +124,6 @@ add_executable(xcloud_homebrew
   "${_vkloader_dir}/vkthunks.c"
   ../src/ui/canvas.cpp
   ../src/ui/font.cpp
-  ../src/ui/brand.cpp
   ../src/ui/app_ui.cpp
   ../src/ui/image_cache.cpp
   ../src/ui/accent_color.cpp
@@ -164,6 +165,9 @@ endif()
 # Keep the RADV archive whole so the linked ICD retains its entry points. The
 # explicit -Wl form is required by the Clang 21 driver in this workspace.
 target_link_options(xcloud_homebrew PRIVATE "-Wl,--wrap=sceVideoOutSubmitFlip")
+if(PSBOX_EXPERIMENTAL_LINK_GC_SECTIONS)
+  target_link_options(xcloud_homebrew PRIVATE "-Wl,--gc-sections")
+endif()
 target_link_libraries(xcloud_homebrew PRIVATE
   -Wl,--whole-archive "${_radv_archive}" -Wl,--no-whole-archive
   "${XC_PS4_SDL3_BUILD}/libSDL3.a"

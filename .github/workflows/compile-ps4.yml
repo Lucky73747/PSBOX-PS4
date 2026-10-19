@@ -56,6 +56,7 @@ jobs:
       - name: Compile and package
         env:
           PSBOX_BUILD_JOBS: '4'
+          PSBOX_EXPERIMENTAL_LINK_GC_SECTIONS: 'ON'
         run: |
           set -euo pipefail
           tools/ps4/build.sh --check-inputs

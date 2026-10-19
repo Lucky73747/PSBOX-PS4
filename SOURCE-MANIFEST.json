@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "created_utc": "2026-10-19T15:44:19.611424+00:00",
+  "created_utc": "2026-10-19T18:13:06.720281+00:00",
   "application": "PSBOX-PS4",
   "scope": "current selected source, including uncommitted changes",
   "history_included": false,
@@ -13,8 +13,8 @@
     },
     {
       "path": ".github/workflows/compile-ps4.yml",
-      "size": 3691,
-      "sha256": "7094278c284edf9ebf2ed3610fa496656ca56f2cedf587e15a0f71615189ddfe"
+      "size": 3743,
+      "sha256": "f11dfd4e5d4962ae4c8281b7ca524dffae21980fb0ab54bb747452d050f7081a"
     },
     {
       "path": ".gitignore",
@@ -38,13 +38,13 @@
     },
     {
       "path": "BUILDING.md",
-      "size": 2385,
-      "sha256": "33244ce48bd54f4ec10e21c4d082b4a1efd24bd7c3452afd313ee17c5f24beee"
+      "size": 3486,
+      "sha256": "15d9487b50d47a2fa4c5a83f0dc4c5108509bae11c575b908cdfcfcec9fe3117"
     },
     {
       "path": "BUILD_NUMBER",
       "size": 3,
-      "sha256": "25d4f2a86deb5e2574bb3210b67bb24fcc4afb19f93a7b65a057daa874a9d18e"
+      "sha256": "7ee29791fc17e986b97128845622b077fb45e349fdb80523fac9dba879b4ad60"
     },
     {
       "path": "DEPENDENCIES-RECOVERY.md",
@@ -63,8 +63,8 @@
     },
     {
       "path": "README.md",
-      "size": 19236,
-      "sha256": "670a348e89568287318ae4da0a745326cadabfbb1444b50cb19091b61d95c39b"
+      "size": 19364,
+      "sha256": "b7d14993f4705518d48164da04278143920fc9c8f040929389a7fe48f3bc29ff"
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
@@ -14073,8 +14073,8 @@
     },
     {
       "path": "docs/CHANGELOG.md",
-      "size": 3500,
-      "sha256": "4c29983f328e1e5b8cebfe3528ede0b045f40c1682aab5854ded7874eb0494fb"
+      "size": 4698,
+      "sha256": "0bea7c10c561b392850f85f39926689d708fcc052970ad6d5c4579f8e98aea58"
     },
     {
       "path": "docs/LICENSE-STATUS.md",
@@ -14358,8 +14358,8 @@
     },
     {
       "path": "ps4-homebrew/CMakeLists.txt",
-      "size": 10555,
-      "sha256": "bbf1c5d2dec59ab260a3308d3aa6d62f5ce977aac0b3f4359cfe72b15b0c652c"
+      "size": 10775,
+      "sha256": "938e87bbc5ad59866f01c5d15dc5e5a6a7d48a7212a6113fd55aed1733c90fc5"
     },
     {
       "path": "ps4-homebrew/audio_player.cpp",
@@ -14388,8 +14388,8 @@
     },
     {
       "path": "ps4-homebrew/main.cpp",
-      "size": 192233,
-      "sha256": "fb7d2dc622e02db6c781f7e99283453fa15e9ff4b22c6b4473bffd2de77ed6e0"
+      "size": 198905,
+      "sha256": "123dcba576e551d713093dc64d59a01c97b9e764576b5cd5eabbb5f486b1eba6"
     },
     {
       "path": "ps4-homebrew/native_thread_cpu.h",
@@ -14443,8 +14443,8 @@
     },
     {
       "path": "ps4-homebrew/stream_menu_ui.cpp",
-      "size": 26860,
-      "sha256": "a6c3e58be9d989878f384a75b94cdeed78a9ac27e62d1c7f19c6de2c3d5cc13f"
+      "size": 28952,
+      "sha256": "7b1607d80c9d8ad553c7bf0caa623be5fcac44f32371e8aa454433393e1b9d54"
     },
     {
       "path": "ps4-homebrew/stream_menu_ui.h",
@@ -14453,8 +14453,8 @@
     },
     {
       "path": "ps4-homebrew/stream_stats_ui.cpp",
-      "size": 24766,
-      "sha256": "6789d9f014407badb2e1b9355b4ffb5c71455f31ba1652e2188bd55f0a3d0580"
+      "size": 26477,
+      "sha256": "0cdd6129e48e787852699f45beac500d5ae76236e90372cabb88a5b2cac06224"
     },
     {
       "path": "ps4-homebrew/stream_stats_ui.h",
@@ -14508,8 +14508,8 @@
     },
     {
       "path": "ps4-homebrew/xcloud_login.cpp",
-      "size": 8823,
-      "sha256": "cf8002a4d3f0f26da355b29f8a032691dc31f7b2bf1b3db9b17e3d003372e1cd"
+      "size": 8861,
+      "sha256": "98eff8194525e9d9fb0f4fb8d702541cead5b6a0302f19cc508a0d16012e545a"
     },
     {
       "path": "ps4-homebrew/xcloud_login.h",
@@ -14973,13 +14973,13 @@
     },
     {
       "path": "src/ui/app_ui.cpp",
-      "size": 192236,
-      "sha256": "fd3763dc9b86f937fb0d6388115df02447702d23b324c65777f075b9e4dedc3a"
+      "size": 196298,
+      "sha256": "d99eb0a974434a9bcacc317ae7b298bf88e98a69fce6558e7699a707ac3fb1a2"
     },
     {
       "path": "src/ui/app_ui.h",
-      "size": 23929,
-      "sha256": "01ba7210114e9d2bceb91826ec4c33ad57c595938a72ff70004ab4e5f00df5a1"
+      "size": 24208,
+      "sha256": "15592ac7c11e1d73e44a7be5bb0da9d03f2ac1f1cc15a97b8445f2f183c59cfe"
     },
     {
       "path": "src/ui/brand.cpp",
@@ -15043,13 +15043,13 @@
     },
     {
       "path": "src/ui/strings.cpp",
-      "size": 50486,
-      "sha256": "7386c91732209337873becdd46f4184308fa19f2317969179ae402cf34ff7f8f"
+      "size": 55339,
+      "sha256": "82fb946ebb6cec8b1d1733ba41b50a2ff9ed6fedca86d191308da3c4726b8059"
     },
     {
       "path": "src/ui/strings.h",
-      "size": 9204,
-      "sha256": "c8482f777c7c87a7c42f36ba316bfcafcb4017e8eb20d8b5cfb042731505894f"
+      "size": 9551,
+      "sha256": "a73d3a34d76d3fb2bdad42e8c4992509e082ba5591de262a841c8e86ad87bf48"
     },
     {
       "path": "src/util/json.cpp",
@@ -15138,8 +15138,8 @@
     },
     {
       "path": "tools/ps4/build.sh",
-      "size": 5122,
-      "sha256": "0f92ce88fc535c39033cfc64e1f9c31f1aa08177db7acce02c74102904de2533"
+      "size": 5647,
+      "sha256": "f9118f05bb527eb4c7d27a687be4a679d14d4b6566d34643c61f442b99b1ae66"
     },
     {
       "path": "tools/ps4/ps4-pc-manager/agent_cli.py",

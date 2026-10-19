@@ -2,7 +2,7 @@
 
 **An unofficial, experimental homebrew client for streaming games to PlayStation 4.**
 
-[🇧🇷 Leia em português](#psbox-para-ps4) · [Download Beta 0.1](https://github.com/Lucky73747/PSBOX-PS4/releases/latest) · [Changelog](docs/CHANGELOG.md)
+[🇧🇷 Leia em português](#psbox-para-ps4) · [Download latest release](https://github.com/Lucky73747/PSBOX-PS4/releases/latest) · [Changelog](docs/CHANGELOG.md)
 
 *English is the primary version of this document.*
 
@@ -30,7 +30,7 @@ These settings are requests and client-side presentation choices. They do not gu
 
 ## How to use
 
-1. Download `PSBOX-0.1.0-beta-b1.pkg` from the [latest release](https://github.com/Lucky73747/PSBOX-PS4/releases/latest). Compare its SHA-256 with the attached `SHA256SUMS`.
+1. Download the PKG from the [latest published release](https://github.com/Lucky73747/PSBOX-PS4/releases/latest). Compare its SHA-256 with the attached `SHA256SUMS`.
 2. Install it on a PS4 with a compatible homebrew environment and network access. A retail PS4 without homebrew support cannot install this package. A complete firmware compatibility list is not yet available.
 3. Open **PSBOX**, follow the account sign-in prompts, then choose an available game from the catalog.
 
@@ -142,7 +142,7 @@ This list is an acknowledgement, not a replacement for license notices, and does
 
 **Um cliente homebrew não oficial e experimental para transmitir jogos ao PlayStation 4.**
 
-[English](#psbox-for-ps4) · [Baixar Beta 0.1](https://github.com/Lucky73747/PSBOX-PS4/releases/latest) · [Changelog](docs/CHANGELOG.md)
+[English](#psbox-for-ps4) · [Baixar a versão publicada](https://github.com/Lucky73747/PSBOX-PS4/releases/latest) · [Changelog](docs/CHANGELOG.md)
 
 *Esta é a tradução em português da documentação principal em inglês.*
 
@@ -170,11 +170,11 @@ Essas configurações são solicitações e escolhas de apresentação feitas pe
 
 ## Como usar
 
-1. Baixe `PSBOX-0.1.0-beta-b1.pkg` na [release mais recente](https://github.com/Lucky73747/PSBOX-PS4/releases/latest). Compare o SHA-256 com o arquivo `SHA256SUMS` anexado.
+1. Baixe o PKG da [versão publicada mais recente](https://github.com/Lucky73747/PSBOX-PS4/releases/latest). Compare o SHA-256 com o arquivo `SHA256SUMS` anexado.
 2. Instale em um PS4 com ambiente homebrew compatível e acesso à rede. Um PS4 original sem suporte a homebrew não instala esse pacote. Ainda não existe uma lista completa de firmwares compatíveis.
 3. Abra **PSBOX**, siga as instruções de login e escolha um jogo disponível no catálogo.
 
-**Beta atual:** app **0.1.0**, build **1**, identificador `PSBX00001`, instalador `00.01`. Instala separadamente do antigo `XCHM00001`. A mudança de identificador não migra nem apaga automaticamente os dados de conta e perfil existentes.
+**Versão pública atual:** app **0.1.0**, build **1**, identificador `PSBX00001`, instalador `00.01`. A versão **0.1.1**, build **18**, está sendo preparada como candidata menor e ainda passa por revisão no console. Instala separadamente do antigo `XCHM00001`. A mudança de identificador não migra nem apaga automaticamente os dados de conta e perfil existentes.
 
 Baixe pacotes somente de fontes confiáveis. Considere os riscos de usar software experimental e não oficial com sua conta e seu console.
 

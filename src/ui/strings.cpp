@@ -4,6 +4,7 @@
 
 #include <array>
 #include <atomic>
+#include <cctype>
 
 namespace xc::ui {
 
@@ -244,6 +245,20 @@ constexpr Column kEnglish = {
     "Catalog", // CloudCatalog
     "Owned games", // OwnedGames
     "Cloud games entitled outside a subscription; this list may be incomplete.", // OwnedGamesHint
+    "Recent", // RecentTab
+    "Details", // Details
+    "Select a game to see details or start it.", // SelectGameHint
+    "No games started this session", // NoRecentGames
+    "%s per row", // GamesPerRow
+    "Filter", // FilterLabel
+    "Refresh consoles", // RefreshConsoles
+    "Console", // Console
+    "Start Remote Play", // StartRemotePlay
+    "Available consoles", // AvailableConsoles
+    "The list will refresh when the search ends.", // ConsoleSearchStatus
+    "Setup guide", // SetupGuide
+    "Remove from Recent", // RemoveRecent
+    "Removed from Recent", // RecentRemovedToast
 };
 
 constexpr Column kPortugueseBR = {
@@ -458,6 +473,20 @@ constexpr Column kPortugueseBR = {
     "Catálogo", // CloudCatalog
     "Jogos possuídos", // OwnedGames
     "Jogos na nuvem com acesso sem assinatura; a lista pode ser incompleta.", // OwnedGamesHint
+    "Recentes", // RecentTab
+    "Detalhes", // Details
+    "Selecione um jogo para ver detalhes ou iniciar.", // SelectGameHint
+    "Nenhum jogo iniciado nesta sessão", // NoRecentGames
+    "%s por linha", // GamesPerRow
+    "Filtrar", // FilterLabel
+    "Atualizar consoles", // RefreshConsoles
+    "Console", // Console
+    "Iniciar Remote Play", // StartRemotePlay
+    "Consoles disponíveis", // AvailableConsoles
+    "A lista será atualizada quando a busca terminar.", // ConsoleSearchStatus
+    "Guia de configuração", // SetupGuide
+    "Remover dos recentes", // RemoveRecent
+    "Removido dos recentes", // RecentRemovedToast
 };
 
 constexpr Column kSpanish = {
@@ -586,7 +615,7 @@ constexpr Column kSpanish = {
     "Apagada",
     "Buscando tus consolas...",
     "Aún no se encontró ninguna consola",
-    "Juega en tu propio console desde aquí: su pantalla, juegos y aplicaciones.",
+    "Juega en tu propia consola desde aquí: su pantalla, juegos y aplicaciones.",
     "Encendiendo tu consola...",
     "%s no respondió. Comprueba que las Funciones remotas estén activadas y el modo de energía sea Suspensión, o enciéndela, y vuelve a intentarlo.",
     "En tu consola, inicia sesión con esta misma cuenta Microsoft.",
@@ -672,6 +701,20 @@ constexpr Column kSpanish = {
     "Catálogo", // CloudCatalog
     "Juegos propios", // OwnedGames
     "Juegos en la nube sin suscripción; la lista puede ser incompleta.", // OwnedGamesHint
+    "Recientes", // RecentTab
+    "Detalles", // Details
+    "Selecciona un juego para ver los detalles o iniciarlo.", // SelectGameHint
+    "No se han iniciado juegos en esta sesión", // NoRecentGames
+    "%s por fila", // GamesPerRow
+    "Filtrar", // FilterLabel
+    "Actualizar consolas", // RefreshConsoles
+    "Consola", // Console
+    "Iniciar Remote Play", // StartRemotePlay
+    "Consolas disponibles", // AvailableConsoles
+    "La lista se actualizará cuando termine la búsqueda.", // ConsoleSearchStatus
+    "Guía de configuración", // SetupGuide
+    "Quitar de recientes", // RemoveRecent
+    "Quitado de recientes", // RecentRemovedToast
 };
 
 constexpr Column kFrench = {
@@ -734,7 +777,7 @@ constexpr Column kFrench = {
     "Disponibles à l'achat",
     "ACHETER",
     "Achetez ce jeu pour y jouer dans le cloud",
-    "Achetez-le sur site du service ou dans l'app do serviço ; il apparaîtra ensuite dans Mes jeux.",
+    "Achetez-le sur le site du service ou dans l'application du service ; il apparaîtra ensuite dans Mes jeux.",
     "Scannez pour ouvrir la page du magasin",
     "Rechercher dans %s",
     "GRATUIT",
@@ -790,7 +833,7 @@ constexpr Column kFrench = {
     "Mise à l'échelle",
     "IA (Anime4K)",
     "Gratuit",
-    "Obtenez-le une fois, gratuitement, sur site du service ou dans l'app do serviço (scannez le code avec votre téléphone), puis appuyez sur Jouer.",
+    "Obtenez-le une fois, gratuitement, sur le site du service ou dans l'application du service (scannez le code avec votre téléphone), puis appuyez sur Jouer.",
     "Scannez pour l'obtenir gratuitement",
     "%s n'est pas encore sur votre compte. Il est gratuit : scannez le code sur sa page, choisissez Obtenir, puis réessayez (cela peut prendre une minute).",
     "Votre compte ne peut pas jouer à %s : il n'est pas dans votre abonnement ou n'a pas été acheté.",
@@ -810,7 +853,7 @@ constexpr Column kFrench = {
     "Rechercher à nouveau",
     "Bouton Guide",
     "Arrêter la diffusion",
-    "La diffusion a été arrêtée sur la consola",
+    "La diffusion a été arrêtée sur la console",
     "Un autre appareil a repris la diffusion",
     "La console a été éteinte",
     "%s a reçu la demande, mais son jeu à distance n'a pas démarré. Redémarrez-la : maintenez le bouton d'alimentation de la console 10 secondes, rallumez-la, puis réessayez.",
@@ -886,6 +929,20 @@ constexpr Column kFrench = {
     "Catalogue", // CloudCatalog
     "Jeux possédés", // OwnedGames
     "Jeux cloud accessibles hors abonnement ; liste potentiellement incomplète.", // OwnedGamesHint
+    "Récents", // RecentTab
+    "Détails", // Details
+    "Sélectionnez un jeu pour voir ses détails ou le lancer.", // SelectGameHint
+    "Aucun jeu lancé pendant cette session", // NoRecentGames
+    "%s par ligne", // GamesPerRow
+    "Filtrer", // FilterLabel
+    "Actualiser les consoles", // RefreshConsoles
+    "Console", // Console
+    "Démarrer Remote Play", // StartRemotePlay
+    "Consoles disponibles", // AvailableConsoles
+    "La liste sera actualisée à la fin de la recherche.", // ConsoleSearchStatus
+    "Guide de configuration", // SetupGuide
+    "Retirer des récents", // RemoveRecent
+    "Retiré des récents", // RecentRemovedToast
 };
 
 constexpr Column kGerman = {
@@ -1100,6 +1157,20 @@ constexpr Column kGerman = {
     "Katalog", // CloudCatalog
     "Eigene Spiele", // OwnedGames
     "Cloud-Spiele außerhalb des Abos; diese Liste kann unvollständig sein.", // OwnedGamesHint
+    "Zuletzt", // RecentTab
+    "Details", // Details
+    "Wähle ein Spiel aus, um Details zu sehen oder es zu starten.", // SelectGameHint
+    "In dieser Sitzung wurde noch kein Spiel gestartet", // NoRecentGames
+    "%s pro Zeile", // GamesPerRow
+    "Filtern", // FilterLabel
+    "Konsolen aktualisieren", // RefreshConsoles
+    "Konsole", // Console
+    "Remote Play starten", // StartRemotePlay
+    "Verfügbare Konsolen", // AvailableConsoles
+    "Die Liste wird nach der Suche aktualisiert.", // ConsoleSearchStatus
+    "Einrichtungsanleitung", // SetupGuide
+    "Aus den zuletzt verwendeten entfernen", // RemoveRecent
+    "Aus den zuletzt verwendeten entfernt", // RecentRemovedToast
 };
 
 constexpr Column kItalian = {
@@ -1162,7 +1233,7 @@ constexpr Column kItalian = {
     "Disponibili per l'acquisto",
     "ACQUISTA",
     "Acquista questo gioco per giocarci nel cloud",
-    "Acquistalo su sito del servizio o nell'app do serviço; poi apparirà in I miei giochi.",
+    "Acquistalo sul sito del servizio o nell'app del servizio; poi apparirà in I miei giochi.",
     "Scansiona per aprire la pagina dello store",
     "Cerca in %s",
     "GRATIS",
@@ -1218,7 +1289,7 @@ constexpr Column kItalian = {
     "Upscaling",
     "IA (Anime4K)",
     "Free to play",
-    "Ottienilo una volta, gratis, su sito del servizio o nell'app do serviço (scansiona il codice con il telefono), poi premi Gioca.",
+    "Ottienilo una volta, gratis, sul sito del servizio o nell'app del servizio (scansiona il codice con il telefono), poi premi Gioca.",
     "Scansiona per ottenerlo gratis",
     "%s non è ancora nel tuo account. È gratis: scansiona il codice nella sua pagina, scegli Ottieni e riprova (può volerci un minuto).",
     "Il tuo account non può giocare a %s: non è nel tuo abbonamento o non è stato acquistato.",
@@ -1238,7 +1309,7 @@ constexpr Column kItalian = {
     "Cerca di nuovo",
     "Pulsante Guida",
     "Termina lo streaming",
-    "Lo streaming è stato terminato sulla consola",
+    "Lo streaming è stato terminato sulla console",
     "Un altro dispositivo ha preso lo streaming",
     "La console è stata spenta",
     "%s ha ricevuto la richiesta, ma il gioco remoto non è partito. Riavviala: tieni premuto il pulsante di accensione della console per 10 secondi, riaccendila e riprova.",
@@ -1314,6 +1385,20 @@ constexpr Column kItalian = {
     "Catalogo", // CloudCatalog
     "Giochi posseduti", // OwnedGames
     "Giochi cloud senza abbonamento; l’elenco può essere incompleto.", // OwnedGamesHint
+    "Recenti", // RecentTab
+    "Dettagli", // Details
+    "Seleziona un gioco per vedere i dettagli o avviarlo.", // SelectGameHint
+    "Nessun gioco avviato in questa sessione", // NoRecentGames
+    "%s per riga", // GamesPerRow
+    "Filtra", // FilterLabel
+    "Aggiorna console", // RefreshConsoles
+    "Console", // Console
+    "Avvia Remote Play", // StartRemotePlay
+    "Console disponibili", // AvailableConsoles
+    "L'elenco verrà aggiornato al termine della ricerca.", // ConsoleSearchStatus
+    "Guida alla configurazione", // SetupGuide
+    "Rimuovi dai recenti", // RemoveRecent
+    "Rimosso dai recenti", // RecentRemovedToast
 };
 
 constexpr std::array<const Column*, kLangs> kTable = {&kEnglish, &kPortugueseBR, &kSpanish,
@@ -1340,8 +1425,23 @@ const char* languageCode(Language lang) {
 }
 
 Language languageFromCode(const std::string& code) {
-    for (size_t i = 0; i < kLangs; ++i)
-        if (code == kInfo[i].code) return static_cast<Language>(i);
+    std::string normalized;
+    normalized.reserve(code.size());
+    for (unsigned char ch : code)
+        normalized.push_back(ch == '_' ? '-' : static_cast<char>(std::tolower(ch)));
+    for (size_t i = 0; i < kLangs; ++i) {
+        std::string candidate = kInfo[i].code;
+        for (char& ch : candidate) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (normalized == candidate) return static_cast<Language>(i);
+    }
+    // Accept locale tags written by older clients or platform APIs as well as
+    // the exact stable code returned by languageCode().
+    if (normalized == "en-us" || normalized == "en-gb") return Language::English;
+    if (normalized == "pt" || normalized.rfind("pt-", 0) == 0) return Language::PortugueseBR;
+    if (normalized.rfind("es-", 0) == 0) return Language::Spanish;
+    if (normalized.rfind("fr-", 0) == 0) return Language::French;
+    if (normalized.rfind("de-", 0) == 0) return Language::German;
+    if (normalized.rfind("it-", 0) == 0) return Language::Italian;
     return Language::English;
 }
 
