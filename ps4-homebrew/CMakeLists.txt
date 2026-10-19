@@ -207,7 +207,7 @@ if(COMMAND ps4_create_pkg)
   ps4_create_pkg(xcloud_homebrew
     TITLE_ID PSBX00001
     TITLE "PSBOX"
-    VERSION 00.02
+    VERSION 00.03
     CONTENT_LABEL PSBOXPS4
     ICON "${CMAKE_CURRENT_LIST_DIR}/../assets/ps4/icon0.png"
     EXTRA_FILES
