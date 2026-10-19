@@ -60,7 +60,7 @@ The active PS4 target is defined by `ps4-homebrew/CMakeLists.txt`.
 | Inter fonts | `assets/fonts` | SIL Open Font License 1.1; `assets/fonts/OFL.txt`. |
 | PSBOX icon/artwork | `assets/ps4/icon0.png`, project UI sources | Project code/artwork notice; GPL-3.0-or-later. |
 
-The PS4 recipe copies this notice, the project license, font notices and the public `licenses/` collection into newly built packages. Old PKGs are not changed. This improves notice coverage but does not resolve corresponding-source or unresolved external SDK terms. See [docs/LICENSE-STATUS.md](docs/LICENSE-STATUS.md) before distributing a binary.
+The PS4 recipe copies this notice, the project license, font notices and the public `licenses/` collection into newly built packages. The package includes OpenOrbis `libc.prx` and `libSceFios2.prx`; their corresponding source and GPL-3.0 license from OpenOrbis PS4 Toolchain v0.5.4 are retained under `licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/`. This does not include or resolve licensing for all external SDK inputs. See [docs/LICENSE-STATUS.md](docs/LICENSE-STATUS.md) before distributing a binary.
 
 ## PS5 files shipped in the app package
 

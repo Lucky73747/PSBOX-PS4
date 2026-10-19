@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "created_utc": "2026-10-19T18:13:06.720281+00:00",
+  "created_utc": "2026-10-19T18:56:57.508430+00:00",
   "application": "PSBOX-PS4",
   "scope": "current selected source, including uncommitted changes",
   "history_included": false,
@@ -68,8 +68,8 @@
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
-      "size": 9384,
-      "sha256": "d090a87b46d4e0fc610bba87cb3b0bd5325ec72564f07ce3d801caab9727b605"
+      "size": 9556,
+      "sha256": "e722f353b922f585e551bb69635464b9efd444d9725994b7bd4dc99088e0eb61"
     },
     {
       "path": "VERSION",
@@ -14078,8 +14078,8 @@
     },
     {
       "path": "docs/LICENSE-STATUS.md",
-      "size": 2089,
-      "sha256": "47f07548c3014acb1f6a96bae21a57515796f91fab178c098881541d8cba9264"
+      "size": 3402,
+      "sha256": "f482b3bf0b0955319241f6554cba0c0230318ca207d717777ea89a0321d586ad"
     },
     {
       "path": "docs/PS4-SOURCE-PROVENANCE-LICENSES.md",
@@ -14200,6 +14200,76 @@
       "path": "licenses/README.md",
       "size": 1129,
       "sha256": "a32d22abc0262457e6e0ada11bc7e3bf4a1d3904f9422f0f8cf1a9fd83cd2f67"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/LICENSE",
+      "size": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/README.md",
+      "size": 1435,
+      "sha256": "8ba9bc66bea6b40fe0f9271601d044048b606cae9153e5a6b18b4d1b7c52bc9e"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/src/modules/libSceFios2/Makefile",
+      "size": 2805,
+      "sha256": "f02ea3b990819d41324d75475141e2fc9f2f9b75396cabbc4a28ea52887d5b5a"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/src/modules/libSceFios2/libSceFios2.sln",
+      "size": 1067,
+      "sha256": "c236357bdf32e15db1e341b7b3575cd17dcc0e4beddb6a21bb5376487caec41f"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/src/modules/libSceFios2/libSceFios2/build.bat",
+      "size": 1600,
+      "sha256": "301c4e3689c17998e436b75eebc8592cd9357589f74c5f54cb62a4ec60a521f3"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/src/modules/libSceFios2/libSceFios2/lib.c",
+      "size": 48,
+      "sha256": "cc014d782a8882e910bfbce532ad55db8f0fa73c664faceade9689c627caeeda"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/src/modules/libSceFios2/libSceFios2/libSceFios2.vcxproj",
+      "size": 3868,
+      "sha256": "b630401d96c22cb0c36027636de0c78f9c8960f6909b203046896e934bd5672a"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/src/modules/libSceFios2/libSceFios2/libSceFios2.vcxproj.filters",
+      "size": 1121,
+      "sha256": "e32817667a9d16587fa91e809eb233cd6318b902939a36f1d47c98a0b91b40c1"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/src/modules/libc/Makefile",
+      "size": 2798,
+      "sha256": "a0bd79bdfcb2ceae4cfa31d3c9a25517080170e4ecd7dc38fbcbb091d1102670"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/src/modules/libc/libc.sln",
+      "size": 1046,
+      "sha256": "f5780ee05eb6a1b533d58d8b57a912b2c5f50bc23a2aa2a9ce13c6993aa89c9f"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/src/modules/libc/libc/build.bat",
+      "size": 1600,
+      "sha256": "301c4e3689c17998e436b75eebc8592cd9357589f74c5f54cb62a4ec60a521f3"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/src/modules/libc/libc/lib.c",
+      "size": 43,
+      "sha256": "52e5b73b3ea5f7e157a475fb65319bb6939eec430edd8accd225cede2817d4cc"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/src/modules/libc/libc/libc.vcxproj",
+      "size": 3798,
+      "sha256": "88d43df9087328b86611ed7afa24f8e4e8787a7909e7e623b46e98dbe260a8cf"
+    },
+    {
+      "path": "licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/src/modules/libc/libc/libc.vcxproj.filters",
+      "size": 1000,
+      "sha256": "92efc2ad8b2b4618a7fb8284efe03c3dc4dbaa3b37b14947caf139b0f818faa8"
     },
     {
       "path": "licenses/external/Orbis-SDK-NOTICE.md",
