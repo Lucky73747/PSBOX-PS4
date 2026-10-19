@@ -28,6 +28,7 @@
 #include <orbis/Pad.h>
 #include <orbis/UserService.h>
 #include <SDL3/SDL.h>
+#include <mbedtls/sha256.h>
 
 #include <pthread.h>
 
@@ -41,6 +42,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <mutex>
 #include <memory>
 #include <string>
@@ -55,6 +57,7 @@ constexpr const char* kBuild = xc::ps4::kBuildLabel;
 constexpr const char* kLogDirectory = "/data/PSBOX";
 constexpr const char* kAppLogPath = "/data/PSBOX/xcloud.log";
 constexpr const char* kUiLanguagePath = "/data/PSBOX/ui-language.txt";
+constexpr const char* kControllerSettingsPath = "/data/PSBOX/controller-settings.json";
 void logLine(const char* fmt, ...);
 
 void loadUiLanguage() {
@@ -84,6 +87,49 @@ bool saveUiLanguage(int selected) {
     return true;
 }
 
+std::string ownedGamesCachePath(const std::string& xuid) {
+    if (xuid.empty()) return {};
+    unsigned char digest[32]{};
+    if (mbedtls_sha256(reinterpret_cast<const unsigned char*>(xuid.data()), xuid.size(), digest, 0) != 0)
+        return {};
+    char suffix[33]{};
+    for (size_t i = 0; i < 16; ++i)
+        std::snprintf(suffix + i * 2, 3, "%02x", static_cast<unsigned>(digest[i]));
+    std::memset(digest, 0, sizeof(digest));
+    return std::string("/data/PSBOX/owned-titles-") + suffix + ".json";
+}
+
+void loadControllerSettings(xc::ui::SettingsChoice& choice) {
+    std::string text;
+    if (!xc::platform::readFile(kControllerSettingsPath, text) || text.size() > 1024) return;
+    auto value = xc::json::parse(text);
+    if (!value) return;
+    choice.lightBarMode = static_cast<int>(std::clamp<int64_t>((*value)["lightBarMode"].asInt(0), 0, 2));
+    const std::string hex = (*value)["lightBarColour"].str();
+    if (hex.size() == 7 && hex[0] == '#') {
+        char* end = nullptr;
+        const unsigned long rgb = std::strtoul(hex.c_str() + 1, &end, 16);
+        if (end == hex.c_str() + 7)
+            choice.lightBarColour = xc::ui::rgba(static_cast<uint8_t>(rgb >> 16),
+                                                  static_cast<uint8_t>(rgb >> 8),
+                                                  static_cast<uint8_t>(rgb));
+    }
+}
+
+bool saveControllerSettings(const xc::ui::SettingsChoice& choice) {
+    char hex[8];
+    std::snprintf(hex, sizeof(hex), "#%02X%02X%02X",
+                  static_cast<unsigned>(choice.lightBarColour & 0xFF),
+                  static_cast<unsigned>(choice.lightBarColour >> 8 & 0xFF),
+                  static_cast<unsigned>(choice.lightBarColour >> 16 & 0xFF));
+    xc::json::Value value = xc::json::Value::object();
+    value.set("lightBarMode", std::clamp(choice.lightBarMode, 0, 2));
+    value.set("lightBarColour", std::string(hex));
+    const bool ok = xc::platform::writeFileAtomic(kControllerSettingsPath, value.dump());
+    if (!ok) logLine("controller settings save failed");
+    return ok;
+}
+
 void logLine(const char* fmt, ...) {
     char body[1536];
     va_list ap;
@@ -111,6 +157,7 @@ struct StreamProfile {
     uint32_t fsrTargetHeight = 1080; // EASU target height: 1080 default, 1440/2160 experimental.
     uint8_t statsMode = 2; // 0 off, 1 compact, 2 advanced.
     bool newStatsUiEnabled = true; // Current renderer; diagnostic legacy remains an internal fallback.
+    bool showDockTutorial = true;
     xc::ps4::StreamStatsUiConfig statsUiConfig{};
     uint32_t lastQueueMax = 0;
     uint32_t lastDecodeAvgUs = 0;
@@ -179,6 +226,7 @@ StreamProfile loadStreamProfile() {
         ? static_cast<uint8_t>(storedStatsMode)
         : ((*parsed)["show_advanced_stats"].asBool(true) ? 2 : 0);
     profile.newStatsUiEnabled = (*parsed)["new_stats_ui"].asBool(true);
+    profile.showDockTutorial = (*parsed)["show_dock_tutorial"].asBool(true);
     xc::ps4::readStreamStatsUiConfig((*parsed)["stats_osd"], profile.statsUiConfig);
     if(!profile.newStatsUiEnabled) {
         xc::ps4::applyStreamStatsUiPreset(profile.statsUiConfig,1);
@@ -216,6 +264,7 @@ bool saveStreamProfile(const StreamProfile& profile) {
     value.set("show_advanced_stats", profile.statsMode != 0); // Legacy compatibility.
     value.set("stats_mode", static_cast<int64_t>(profile.statsMode));
     value.set("new_stats_ui",profile.newStatsUiEnabled);
+    value.set("show_dock_tutorial", profile.showDockTutorial);
     xc::json::Value statsOsd=xc::json::Value::object();
     xc::ps4::writeStreamStatsUiConfig(statsOsd,profile.statsUiConfig);
     value.set("stats_osd",std::move(statsOsd));
@@ -316,6 +365,7 @@ public:
     }
 
     ~Controller() {
+        if (handle_ >= 0) scePadResetLightBar(handle_);
         if (handle_ >= 0 && ownsHandle_) scePadClose(handle_);
     }
 
@@ -349,6 +399,7 @@ public:
             }
             if (wasConnected) logLine("scePad controller disconnected");
             connectedLogged_ = false;
+            appliedLightBarMode_ = -1;
             return;
         }
 
@@ -367,12 +418,19 @@ public:
             logLine("scePad controller connected handle=%d", handle_);
             connectedLogged_ = true;
         }
+        applyLightBar();
         if (next.buttons != previousButtons) {
             logLine("scePad buttons=0x%08x", static_cast<unsigned>(next.buttons));
         }
         if ((newLX != oldLX || newLY != oldLY) && (newLX || newLY || oldLX || oldLY)) {
             logLine("scePad left_stick x=%u y=%u", next.leftStick.x, next.leftStick.y);
         }
+    }
+
+    void setLightBar(int mode, xc::ui::Color colour) {
+        std::lock_guard<std::mutex> lock(lightBarMutex_);
+        desiredLightBarMode_ = std::clamp(mode, 0, 2);
+        desiredLightBarColour_ = colour;
     }
 
     bool button(SDL_GamepadButton button) const {
@@ -397,6 +455,11 @@ public:
         std::lock_guard<std::mutex> lock(stateMutex_);
         return state_.connected && (state_.buttons & mask) != 0;
     }
+    bool anyButtonPressed() const {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        return state_.connected && (state_.buttons != 0 || state_.analogButtons.l2 > 16 ||
+                                    state_.analogButtons.r2 > 16);
+    }
     float axis(SDL_GamepadAxis axis) const {
         std::lock_guard<std::mutex> lock(stateMutex_);
         if (!state_.connected) return 0.0f;
@@ -418,6 +481,49 @@ public:
     }
 
 private:
+    void applyLightBar() {
+        int mode;
+        xc::ui::Color colour;
+        {
+            std::lock_guard<std::mutex> lock(lightBarMutex_);
+            mode = desiredLightBarMode_;
+            colour = desiredLightBarColour_;
+        }
+        if (mode == appliedLightBarMode_ && (mode == 2 || colour == appliedLightBarColour_)) return;
+        int32_t rc = 0;
+        OrbisPadColor padColour{};
+        if (mode == 2) {
+            // Reset restores the system's default colour; it does not turn
+            // the light off. A black colour with zero brightness represents
+            // the Settings choice labelled "Deactivated".
+            padColour.r = padColour.g = padColour.b = padColour.a = 0;
+        } else {
+            padColour.r = static_cast<uint8_t>(colour);
+            padColour.g = static_cast<uint8_t>(colour >> 8);
+            padColour.b = static_cast<uint8_t>(colour >> 16);
+            padColour.a = 0xFF;
+        }
+        rc = scePadSetLightBar(handle_, &padColour);
+        // Pad APIs use zero for success and non-zero for failure. Checking
+        // only negative values can silently mark a rejected update as applied.
+        if (rc != 0) {
+            if (lastLightBarError_ != rc || lastLightBarErrorMode_ != mode) {
+                logLine("controller light bar update failed mode=%d rgb=%u,%u,%u brightness=%u rc=0x%x",
+                        mode, padColour.r, padColour.g, padColour.b, padColour.a,
+                        static_cast<unsigned>(rc));
+                lastLightBarError_ = rc;
+                lastLightBarErrorMode_ = mode;
+            }
+            return;
+        }
+        appliedLightBarMode_ = mode;
+        appliedLightBarColour_ = colour;
+        lastLightBarError_ = 0;
+        lastLightBarErrorMode_ = -1;
+        logLine("controller light bar applied mode=%d rgb=%u,%u,%u brightness=%u rc=0",
+                mode, padColour.r, padColour.g, padColour.b, padColour.a);
+    }
+
     static int axisBucket(uint8_t value) {
         if (value < 72) return -1;
         if (value > 184) return 1;
@@ -442,25 +548,33 @@ private:
             return;
         }
         openErrorLogged_ = false;
+        appliedLightBarMode_ = -1;
         logLine("scePad opened user=%d handle=%d owned=%d", user, handle_, ownsHandle_ ? 1 : 0);
     }
 
     void closePad() {
+        if (handle_ >= 0) scePadResetLightBar(handle_);
         if (handle_ >= 0 && ownsHandle_) scePadClose(handle_);
         handle_ = -1;
         ownsHandle_ = false;
         connectedLogged_ = false;
+        appliedLightBarMode_ = -1;
     }
 
     OrbisPadData state_{};
     mutable std::mutex stateMutex_;
     std::mutex pumpMutex_;
     int32_t handle_ = -1;
+    int32_t lastLightBarError_ = 0;
     uint64_t nextOpenAt_ = 0;
     bool padInitialized_ = false;
     bool ownsHandle_ = false;
     bool connectedLogged_ = false;
     bool openErrorLogged_ = false;
+    int lastLightBarErrorMode_ = -1;
+    std::mutex lightBarMutex_;
+    int desiredLightBarMode_ = 0, appliedLightBarMode_ = -1;
+    xc::ui::Color desiredLightBarColour_ = xc::ui::rgba(0, 112, 220), appliedLightBarColour_ = 0;
 };
 
 constexpr const char* kTokenDirectory = "/data/XCHM00001";
@@ -537,6 +651,7 @@ struct LoginState {
     bool gpuVideoActive = false;
     std::atomic<uint32_t> streamWorkerStep{0};
     std::atomic<uint64_t> streamWorkerStepAtMs{0};
+    std::atomic<bool> streamDockTutorialActive{false};
     LoginStage stage = LoginStage::Starting;
     std::string verificationUri;
     std::string verificationUriComplete;
@@ -545,10 +660,12 @@ struct LoginState {
     std::string market;
     std::string region;
     std::string gamertag;
+    std::string ownedCachePath;
     std::shared_ptr<const std::vector<xc::xcloud::Title>> visibleTitles;
     std::shared_ptr<const std::vector<xc::ui::GameTile>> uiTitles;
     size_t catalogTitleCount = 0;
     bool libraryLoading = false;
+    bool libraryComplete = false;
     size_t libraryLoaded = 0;
     uint64_t libraryRevision = 0;
     uint64_t uiLibraryRevision = 0;
@@ -609,6 +726,7 @@ struct LoginSnapshot {
     std::string market;
     std::string region;
     std::string gamertag;
+    std::string ownedCachePath;
     std::shared_ptr<const std::vector<xc::xcloud::Title>> visibleTitles;
     std::shared_ptr<const std::vector<xc::ui::GameTile>> uiTitles;
     size_t catalogTitleCount;
@@ -618,6 +736,7 @@ struct LoginSnapshot {
     int expiresInSec;
     uint64_t generation;
     bool libraryLoading;
+    bool libraryComplete;
     size_t libraryLoaded;
     uint64_t libraryRevision;
     uint64_t uiLibraryRevision;
@@ -663,10 +782,10 @@ struct LoginSnapshot {
 LoginSnapshot snapshot(LoginState& state) {
     std::lock_guard<std::mutex> lock(state.mutex);
     return {state.stage, state.verificationUri, state.verificationUriComplete, state.userCode, state.error,
-            state.market, state.region, state.gamertag, state.visibleTitles, state.uiTitles,
+            state.market, state.region, state.gamertag, state.ownedCachePath, state.visibleTitles, state.uiTitles,
             state.catalogTitleCount,
             state.sessionMessage, state.cancelSessionRequested.load(std::memory_order_acquire), state.selectedTitle,
-            state.expiresInSec, state.generation, state.libraryLoading, state.libraryLoaded,
+            state.expiresInSec, state.generation, state.libraryLoading, state.libraryComplete, state.libraryLoaded,
             state.libraryRevision, state.uiLibraryRevision, state.streamTransportLost, state.gpuVideoActive, state.streamTier,
             state.streamBitrateCap, state.streamRembEstimate, state.streamReceiveRate,
             state.streamRttMs, state.streamWidth, state.streamHeight,
@@ -742,6 +861,11 @@ bool finishXboxLogin(LoginState& state, xc::auth::MsaTokens& msaTokens) {
     }
     wipeToken(userToken);
     logLine("xsts authorization for xcloud complete");
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.ownedCachePath = ownedGamesCachePath(gssvXsts.xuid);
+        ++state.generation;
+    }
 
     setStage(state, LoginStage::Xcloud);
     logLine("xcloud GSSV login started offering=xgpuweb");
@@ -790,6 +914,7 @@ bool finishXboxLogin(LoginState& state, xc::auth::MsaTokens& msaTokens) {
                 state.sessionMessage.clear();
             }
             state.libraryLoading = !complete;
+            state.libraryComplete = complete;
             state.libraryLoaded = visibleTitles;
             ++state.libraryRevision;
             ++state.generation;
@@ -803,6 +928,7 @@ bool finishXboxLogin(LoginState& state, xc::auth::MsaTokens& msaTokens) {
         if (libraryPublished) {
             std::lock_guard<std::mutex> lock(state.mutex);
             state.libraryLoading = false;
+            state.libraryComplete = false;
             state.libraryLoaded = state.visibleTitles ? state.visibleTitles->size() : 0;
             if (state.stage == LoginStage::Library) state.error = error;
             ++state.generation;
@@ -1180,11 +1306,9 @@ void* sessionWorker(void* opaque) {
             StreamProfile settingsOriginal = streamProfile;
             uint64_t nextHudStatsAt = nextGamepadAt;
             uint64_t previousHudDropCount = 0, previousHudStatsAt = nextGamepadAt;
-            uint64_t decoderResetHeldSince = 0;
-            bool decoderResetLatched = false;
             uint64_t xboxGuideUntil = 0;
             bool transportLostNotified = false;
-            logLine("GAMEPAD TX enabled source=scePad poll_thread=controller_input_worker poll_target_ms=4 send_thread=gamepad_sender send_policy=every_new_sample guide=TOUCHPAD rising_edge guide_pulse_ms=250 exit=dock_confirm_only");
+            logLine("GAMEPAD TX enabled source=scePad poll_thread=controller_input_worker poll_target_ms=4 send_thread=gamepad_sender send_policy=every_new_sample guide=TOUCHPAD rising_edge guide_pulse_ms=250 view=chord_L3_R3 exit=dock_confirm_only");
             uint64_t lastPerformanceGeneration = 0;
             uint64_t performanceWindows = 0;
             uint32_t pressureWindows = 0;
@@ -1278,6 +1402,18 @@ void* sessionWorker(void* opaque) {
                             waitForInputRelease.store(false, std::memory_order_release);
                             inputMuted.store(false, std::memory_order_release);
                             logLine("GAMEPAD input ownership=game resumed=1 reason=all_controls_released");
+                        }
+                    }
+                    if (state.streamDockTutorialActive.load(std::memory_order_acquire)) {
+                        const bool tutorialButton = job->controller && job->controller->anyButtonPressed();
+                        if (tutorialButton) {
+                            state.streamDockTutorialActive.store(false, std::memory_order_release);
+                            inputMuted.store(true, std::memory_order_release);
+                            waitForInputRelease.store(true, std::memory_order_release);
+                            sampled = {};
+                            logLine("dock_tutorial dismissed=button input_forwarding=paused_until_release");
+                        } else {
+                            sampled = {};
                         }
                     }
                     if (inputMuted.load(std::memory_order_acquire)) sampled = {};
@@ -1457,20 +1593,6 @@ void* sessionWorker(void* opaque) {
                     const bool options = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_START);
                     const bool circle = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_EAST);
                     const bool touchpad = job->controller && job->controller->button(SDL_GAMEPAD_BUTTON_TOUCHPAD);
-                    const bool resetChord = job->controller &&
-                        job->controller->button(SDL_GAMEPAD_BUTTON_LEFT_STICK) &&
-                        job->controller->button(SDL_GAMEPAD_BUTTON_RIGHT_STICK);
-                    if (resetChord) {
-                        if (!decoderResetHeldSince) decoderResetHeldSince = now;
-                        if (!decoderResetLatched && now - decoderResetHeldSince >= 1000) {
-                            decoderResetLatched = true;
-                            job->video->requestReset(xc::ps4::VideoResetRequestReason::UserMasterButton);
-                            logLine("decoder_reset request=user_master_button chord=L3+R3 hold_ms=1000");
-                        }
-                    } else {
-                        decoderResetHeldSince = 0;
-                        decoderResetLatched = false;
-                    }
                     if (options) {
                         if (!optionsHeldSince) optionsHeldSince = now;
                         if (!settingsOpen && !settingsOpenLatched && now - optionsHeldSince >= 700) {
@@ -2339,6 +2461,10 @@ struct DrawContext {
     uint32_t canvasCopySamples = 0;
     uint32_t canvasCopyMaxUs = 0;
     uint32_t canvasCopyAvgUs = 0;
+    bool dockTutorialEnabled = true;
+    bool dockTutorialPending = false;
+    bool dockTutorialWasVisible = false;
+    uint64_t dockTutorialUntilMs = 0;
     size_t ps5UiTitleCount = 0;
     uint64_t ps5UiLibraryRevision = 0;
     struct Repeater {
@@ -2354,6 +2480,18 @@ struct DrawContext {
     bool ps5UiLoading = false;
     xc::ps4::VideoRepeatWatchdog repeatWatchdog;
 };
+
+void drawDockTutorial(xc::ui::Canvas& canvas, xc::ui::Fonts& fonts) {
+    const std::string text = fonts.semibold.fit(xc::ui::tr(xc::ui::Str::DockTutorialHint), 25, 1500);
+    constexpr int padX = 30, panelH = 72;
+    const int panelW = std::min(1760, fonts.semibold.measure(text, 25) + 2 * padX);
+    const int x = (canvas.width() - panelW) / 2;
+    const int y = 54;
+    canvas.fillRect({x, y, panelW, panelH}, xc::ui::rgba(8, 10, 9, 224), 18);
+    canvas.strokeRect({x, y, panelW, panelH}, xc::ui::rgba(255, 255, 255, 46), 2, 18);
+    fonts.semibold.draw(canvas, text, (canvas.width() - fonts.semibold.measure(text, 25)) / 2,
+                        fonts.semibold.centeredY(y, panelH, 25), 25, xc::ui::rgba(245, 247, 245));
+}
 
 xc::stream::GamepadFrame readStreamGamepad(const Controller& controller) {
     using B = SDL_GamepadButton;
@@ -2375,6 +2513,12 @@ xc::stream::GamepadFrame readStreamGamepad(const Controller& controller) {
     set(controller.button(B::SDL_GAMEPAD_BUTTON_LEFT_STICK), xc::stream::kLeftThumb);
     set(controller.button(B::SDL_GAMEPAD_BUTTON_RIGHT_STICK), xc::stream::kRightThumb);
     set(controller.button(B::SDL_GAMEPAD_BUTTON_START), xc::stream::kMenu);
+    const bool viewChord = controller.button(B::SDL_GAMEPAD_BUTTON_LEFT_STICK) &&
+                           controller.button(B::SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+    if (viewChord) {
+        frame.buttons &= ~(xc::stream::kLeftThumb | xc::stream::kRightThumb);
+        frame.buttons |= xc::stream::kView;
+    }
     // The PS4 touchpad click is reserved for a short Xbox Guide/Nexus pulse.
     // Mapping it to View made Guide inaccessible when the chord was sampled
     // between slow UI refreshes.
@@ -2479,7 +2623,7 @@ std::vector<xc::ui::GameTile> makeGameTiles(const std::vector<xc::xcloud::Title>
 void loadPs5LibraryUi(xc::ui::AppUi& appUi, const LoginSnapshot& state) {
     // Clear saved hidden-title choices so the full cloud catalog is visible.
     appUi.setPrefs({}, xc::ui::LibrarySort::Recent);
-    appUi.setCloudLibrary(makeGameTiles(state));
+    appUi.setCloudLibrary(makeGameTiles(state), state.libraryComplete);
     appUi.setLoading(state.libraryLoading, state.libraryLoaded, 0);
     appUi.setProfile(state.gamertag, {});
     appUi.showHome("PSBOX");
@@ -2487,7 +2631,7 @@ void loadPs5LibraryUi(xc::ui::AppUi& appUi, const LoginSnapshot& state) {
 }
 
 void updatePs5LibraryUi(xc::ui::AppUi& appUi, const LoginSnapshot& state) {
-    appUi.setCloudLibrary(makeGameTiles(state));
+    appUi.setCloudLibrary(makeGameTiles(state), state.libraryComplete);
     appUi.setLoading(state.libraryLoading, state.libraryLoaded, 0);
 }
 
@@ -2791,6 +2935,10 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
     const uint64_t snapshotStartedUs = sceKernelGetProcessTime();
     auto state = snapshot(*context.state);
     const uint64_t snapshotCostUs = sceKernelGetProcessTime() - snapshotStartedUs;
+        if (context.ps5Ui && context.ps5Ui->screen() != xc::ui::Screen::Settings)
+            context.ps5Ui->setStreamResolution(state.streamTier == "1080" ? 0 : 1);
+    if (context.ps5Ui && !state.ownedCachePath.empty())
+        context.ps5Ui->setOwnedCachePath(state.ownedCachePath);
     if (state.stage == LoginStage::Library && context.imageCache &&
         (!context.lastImageCacheStatsMs || now - context.lastImageCacheStatsMs >= 30000)) {
         context.lastImageCacheStatsMs = now;
@@ -2875,6 +3023,31 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
         context.ps5Ui->invalidate();
         context.ps5UiReady = false;
     }
+    if (enteringStream) {
+        context.dockTutorialPending = context.dockTutorialEnabled;
+        context.dockTutorialUntilMs = 0;
+        context.dockTutorialWasVisible = false;
+        context.state->streamDockTutorialActive.store(false, std::memory_order_release);
+    } else if (state.stage != LoginStage::Streaming) {
+        context.dockTutorialPending = false;
+        context.dockTutorialUntilMs = 0;
+        context.dockTutorialWasVisible = false;
+        context.state->streamDockTutorialActive.store(false, std::memory_order_release);
+    }
+    if (state.stage == LoginStage::Streaming && context.dockTutorialPending &&
+        context.video && context.video->hasFrame()) {
+        context.dockTutorialPending = false;
+        context.dockTutorialUntilMs = now + 2000;
+        context.state->streamDockTutorialActive.store(true, std::memory_order_release);
+        logLine("dock_tutorial shown duration_ms=2000 dismiss=any_controller_button enabled=1");
+    }
+    if (context.dockTutorialUntilMs && now >= context.dockTutorialUntilMs) {
+        context.dockTutorialUntilMs = 0;
+        context.state->streamDockTutorialActive.store(false, std::memory_order_release);
+    }
+    const bool dockTutorialVisible = context.dockTutorialUntilMs > now &&
+        context.state->streamDockTutorialActive.load(std::memory_order_acquire);
+    const bool dockTutorialChanged = dockTutorialVisible != context.dockTutorialWasVisible;
     context.previousStage = state.stage;
 
     if (state.stage == LoginStage::Streaming) {
@@ -2996,6 +3169,7 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
                                       state.streamStatsMode == 2 ? advancedStatsChanged : false;
             const bool hudChanged = enteringStream || (!gpuVideoEnabled && newFrame) || statsChanged ||
                                     state.generation != context.lastGeneration ||
+                                    dockTutorialChanged ||
                                     (settingsShouldDraw && settingsAnimationActive) ||
                                     (settingsShouldDraw && (menuCardAnimationActive || pageAnimationActive || dockAnimation.active(now)));
             if (!hudChanged) return {false, false, gpuVideoEnabled, context.canvas, state.streamFrameRate, state.streamUpscaler, state.streamRcasSharpness, state.streamNativeRcas, state.streamFsrTargetHeight, state.streamTier == "1080"};
@@ -3082,13 +3256,15 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
             legacy.rows[6]=cpu;
             const char* controls = state.streamTransportLost
                 ? "Last frame held. Open Options and select the red exit button to return to the library."
-                : "Touchpad: Guide   Hold Options 0.7s: settings   L3+R3 (1s): reset video";
+                : "Touchpad: Guide   L3+R3: View/Back   Hold Options 0.7s: settings";
             legacy.controls=controls;
             xc::ps4::drawStreamLegacyStatsUi(*context.canvas,*context.fonts,legacy);
                 }
             }
             if (settingsShouldDraw) xc::ps4::drawStreamMenuUi(*context.canvas, *context.fonts, makeStreamMenuUiState(state),
                 now, settingsVisibility, settingsPageProgress, menuCardProgress, &dockAnimation);
+            if (dockTutorialVisible) drawDockTutorial(*context.canvas, *context.fonts);
+            context.dockTutorialWasVisible = dockTutorialVisible;
             context.lastHudPerformanceGeneration = performance.generation;
             context.lastPresentationGeneration = presentation.generation;
             context.lastStreamStatsGeneration = state.streamStatsGeneration;
@@ -3151,15 +3327,42 @@ xc::ps4::CanvasFrameUpdateResult refreshCanvas(uint32_t*, void* opaque,
                         static_cast<unsigned long long>(state.uiLibraryRevision),
                         state.libraryLoading ? 1 : 0);
             } else if (context.ps5UiLoading != state.libraryLoading) {
-                context.ps5Ui->setLoading(state.libraryLoading, state.libraryLoaded, 0);
+                updatePs5LibraryUi(*context.ps5Ui, state);
                 context.ps5UiLoading = state.libraryLoading;
             }
         }
         const auto event = context.ps5Ui->handle(nav);
         if (event.action == xc::ui::Action::SettingsChanged) {
             saveUiLanguage(event.settings.language);
+            saveControllerSettings(event.settings);
+            StreamProfile profile = loadStreamProfile();
+            const std::string selectedTier = event.settings.resolution == 1 ? "720" : "1080";
+            const bool tierChanged = profile.tier != selectedTier;
+            const bool tutorialChanged = profile.showDockTutorial != event.settings.showDockTutorial;
+            context.dockTutorialEnabled = event.settings.showDockTutorial;
+            if (tierChanged || tutorialChanged) {
+                if (tierChanged) profile.tier = selectedTier;
+                profile.showDockTutorial = event.settings.showDockTutorial;
+                const bool saved = saveStreamProfile(profile);
+                if (saved && tierChanged) {
+                    std::lock_guard<std::mutex> lock(context.state->mutex);
+                    context.state->streamTier = profile.tier;
+                    ++context.state->generation;
+                }
+                if (tierChanged)
+                    logLine("stream_settings synced source=app_settings tier=%s persisted=%d",
+                            tierLabel(selectedTier), saved ? 1 : 0);
+                if (tutorialChanged)
+                    logLine("dock_tutorial setting=%s persisted=%d source=app_settings",
+                            profile.showDockTutorial ? "on" : "off", saved ? 1 : 0);
+            }
             logLine("catalog and game locale will use the selected language on the next app launch/session");
         }
+        int lightBarMode = 0;
+        xc::ui::Color lightBarColour = xc::ui::rgba(0, 112, 220), gameAccent = 0;
+        context.ps5Ui->lightBarChoice(lightBarMode, lightBarColour);
+        if (lightBarMode == 0 && context.ps5Ui->accentColor(gameAccent)) lightBarColour = gameAccent;
+        context.controller->setLightBar(lightBarMode, lightBarColour);
         if (event.action == xc::ui::Action::Play) {
             context.ps5Ui->recordRecentGame(event.game);
             // Retain already-resident artwork before HTTP is paused for Play.
@@ -3326,7 +3529,10 @@ int main() {
         for (;;) sceKernelUsleep(1000000);
     }
 
+    const StreamProfile startupStreamProfile = loadStreamProfile();
     LoginState state;
+    state.streamTier = startupStreamProfile.tier;
+    state.streamBitrateCap = startupStreamProfile.maxBitrate;
     xc::ps4::VideoDecoder videoDecoder;
     Controller controller;
     const bool controllerReady = controller.initialize();
@@ -3349,10 +3555,15 @@ int main() {
     xc::ui::AppUi appUi(fonts, images);
     xc::ui::SettingsChoice initialUiSettings;
     initialUiSettings.language = static_cast<int>(xc::ui::language());
+    initialUiSettings.resolution = startupStreamProfile.tier == "1080" ? 0 : 1;
+    initialUiSettings.showDockTutorial = startupStreamProfile.showDockTutorial;
+    loadControllerSettings(initialUiSettings);
     appUi.setSettings(initialUiSettings);
+    appUi.setRecentCachePath("/data/PSBOX/recent-games-v1.json");
     appUi.setQtLibraryUi(PSBOX_DEFAULT_NEW_LIBRARY_UI != 0);
     appUiPtr = &appUi;
     DrawContext draw{&canvas, &fonts, &state, &controller, &appUi, &videoDecoder};
+    draw.dockTutorialEnabled = startupStreamProfile.showDockTutorial;
     draw.imageCache = &images;
     const auto initialState = snapshot(state);
     drawLoginScreen(canvas, fonts, initialState);

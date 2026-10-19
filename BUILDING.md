@@ -1,6 +1,6 @@
 # Building PSBOX for PS4
 
-PSBOX's app version is recorded in `VERSION`; `BUILD_NUMBER` identifies a source build. The current development line is version 0.1.1, build 18. The PS4 title ID is `PSBX00001`. The installer version is managed separately in `ps4-homebrew/CMakeLists.txt` and must increase for packages intended to update an existing installation.
+PSBOX's app version is recorded in `VERSION`; `BUILD_NUMBER` identifies a source build. The current development line is version 0.1.1, build 26. The PS4 title ID is `PSBX00001`. The installer version is managed separately in `ps4-homebrew/CMakeLists.txt` and must increase for packages intended to update an existing installation.
 
 ## Requirements and local build
 
@@ -33,7 +33,11 @@ PSBOX_EXPERIMENTAL_LINK_GC_SECTIONS=ON tools/ps4/build.sh
 
 ## Library UI and artwork cache
 
-The new library interface is the default for PS4. Catalog artwork is requested and decoded asynchronously through the existing image cache. The cache persists downloaded image data under `/data/PSBOX/image-cache-v2`; placeholders remain visible while artwork loads. Recent games are kept in memory for the current app run.
+The new library interface is the default for PS4. Catalog artwork is requested and decoded asynchronously through the existing image cache. The cache persists downloaded image data under `/data/PSBOX/image-cache-v2`; placeholders remain visible while artwork loads. Recent games persist in `/data/PSBOX/recent-games-v1.json`. The owned-games list is cached per signed-in account in `/data/PSBOX/owned-titles-<account-hash>.json` and shown while the current catalog refreshes; the completed server listing replaces the snapshot.
+
+The Settings light bar option controls the DualShock 4 through the PS4 Pad API. Its mode and custom color persist in `/data/PSBOX/controller-settings.json`; game-color mode follows the selected game's artwork when an accent is available.
+
+The Settings menu has a dock tutorial enabled by default. It appears briefly after the first video frame, explains the 0.7-second OPTIONS hold, and can be disabled; the preference is stored in `/data/PSBOX/stream_profile.json`.
 
 With Vulkan active, supported shapes and text are composed through Vulkan. Gradients and artwork are prepared by the CPU Canvas, so the interface is GPU-composited but not fully GPU-rendered. If renderer initialization fails, the CPU Canvas fallback is used. Runtime screens omit the graphic brand mark; the package retains `assets/ps4/icon0.png` as its home-screen icon. Stream settings remain in `/data/PSBOX/stream_profile.json`.
 

@@ -34,7 +34,11 @@ These settings are requests and client-side presentation choices. They do not gu
 2. Install it on a PS4 with a compatible homebrew environment and network access. A retail PS4 without homebrew support cannot install this package. A complete firmware compatibility list is not yet available.
 3. Open **PSBOX**, follow the account sign-in prompts, then choose an available game from the catalog.
 
-**Current beta:** app **0.1.0**, build **1**, title ID `PSBX00001`, installer version `00.01`. It installs separately from the older `XCHM00001` app. Existing account/profile data is not automatically migrated or cleared by this title ID change.
+## Controller guide
+
+On the PS4 controller, press **L3 + R3 together** to send the Xbox **View/Back** button. The PS4 touchpad remains mapped to **Guide**. Holding **Options** for 0.7 seconds opens the in-game dock/settings.
+
+**Current beta:** app **0.1.1**, build **26**, title ID `PSBX00001`, installer version `00.04`. It installs separately from the older `XCHM00001` app. Existing account/profile data is not automatically migrated or cleared by this title ID change.
 
 Obtain packages only from sources you trust. Consider the risks of using experimental, unofficial software with your account and console.
 
@@ -174,7 +178,11 @@ Essas configurações são solicitações e escolhas de apresentação feitas pe
 2. Instale em um PS4 com ambiente homebrew compatível e acesso à rede. Um PS4 original sem suporte a homebrew não instala esse pacote. Ainda não existe uma lista completa de firmwares compatíveis.
 3. Abra **PSBOX**, siga as instruções de login e escolha um jogo disponível no catálogo.
 
-**Versão pública atual:** app **0.1.0**, build **1**, identificador `PSBX00001`, instalador `00.01`. A versão **0.1.1**, build **18**, está sendo preparada como candidata menor e ainda passa por revisão no console. Instala separadamente do antigo `XCHM00001`. A mudança de identificador não migra nem apaga automaticamente os dados de conta e perfil existentes.
+## Guia de controles
+
+No controle do PS4, pressione **L3 + R3 juntos** para enviar o botão **View/Voltar** do controle Xbox. O touchpad do PS4 continua mapeado como **Guide**. Segurar **Options** por 0,7 segundo abre a dock/configurações durante o jogo.
+
+**Beta atual:** app **0.1.1**, build **26**, identificador `PSBX00001`, instalador `00.04`. Instala separadamente do antigo `XCHM00001`. A mudança de identificador não migra nem apaga automaticamente os dados de conta e perfil existentes.
 
 Baixe pacotes somente de fontes confiáveis. Considere os riscos de usar software experimental e não oficial com sua conta e seu console.
 

@@ -7,6 +7,8 @@
 #include "ui/accent_color.h"
 
 #include "ui/strings.h"
+#include "platform/platform.h"
+#include "util/json.h"
 
 #include "qrcodegen.h"
 
@@ -232,7 +234,9 @@ bool AppUi::Anim::step(float dt, float maxStep) {
         value = target;
         return false;
     }
-    value += d * std::clamp(std::min(1.0f, dt * 14.0f), 0.0f, maxStep);
+    const float progress = std::clamp(dt * 9.0f, 0.0f, maxStep);
+    const float eased = 1.0f - (1.0f - progress) * (1.0f - progress) * (1.0f - progress);
+    value += d * eased;  // cubic-out response for focus and list movement
     return true;
 }
 
@@ -341,7 +345,95 @@ void AppUi::setOwned(std::vector<GameTile> owned, std::vector<GameTile> purchasa
     rebuild();
 }
 
-void AppUi::setCloudLibrary(std::vector<GameTile> titles) {
+std::vector<GameTile> AppUi::readGameCache(const std::string& path, const char* key) {
+    std::string text;
+    if (path.empty() || !xc::platform::readFile(path, text) || text.size() > (8u << 20)) return {};
+    auto parsed = xc::json::parse(text);
+    if (!parsed || !(*parsed)[key].isArray()) return {};
+    std::vector<GameTile> games;
+    const auto& array = (*parsed)[key];
+    games.reserve(std::min<size_t>(array.size(), 5000));
+    for (size_t i = 0; i < array.size() && games.size() < 5000; ++i) {
+        const auto& item = array[i];
+        GameTile game;
+        game.productId = item["productId"].str();
+        game.titleId = item["titleId"].str();
+        game.name = item["name"].str();
+        game.publisher = item["publisher"].str();
+        game.tileUrl = item["tileUrl"].str();
+        game.heroUrl = item["heroUrl"].str();
+        game.platform = item["platform"].str();
+        game.accountOwned = item["accountOwned"].asBool();
+        game.myGamesEligible = item["myGamesEligible"].asBool();
+        game.freeInStore = item["freeInStore"].asBool();
+        if (game.productId.size() > 256 || game.titleId.size() > 128 || game.name.size() > 512 ||
+            game.publisher.size() > 512 || game.tileUrl.size() > 4096 || game.heroUrl.size() > 4096 ||
+            game.platform.size() > 32 || (game.productId.empty() && game.titleId.empty())) continue;
+        games.push_back(std::move(game));
+    }
+    return games;
+}
+
+namespace {
+xc::json::Value cacheGames(const std::vector<GameTile>& games) {
+    xc::json::Value array = xc::json::Value::array();
+    for (const auto& game : games) {
+        xc::json::Value item = xc::json::Value::object();
+        item.set("productId", game.productId).set("titleId", game.titleId).set("name", game.name)
+            .set("publisher", game.publisher).set("tileUrl", game.tileUrl).set("heroUrl", game.heroUrl)
+            .set("platform", game.platform).set("accountOwned", game.accountOwned)
+            .set("myGamesEligible", game.myGamesEligible).set("freeInStore", game.freeInStore);
+        array.push(std::move(item));
+    }
+    return array;
+}
+}  // namespace
+
+void AppUi::saveRecentCacheLocked() const {
+    if (recentCachePath_.empty()) return;
+    xc::json::Value root = xc::json::Value::object();
+    root.set("version", 1).set("games", cacheGames(recentGames_));
+    xc::platform::writeFileAtomic(recentCachePath_, root.dump());
+}
+
+void AppUi::saveOwnedCacheLocked() const {
+    if (ownedCachePath_.empty()) return;
+    xc::json::Value root = xc::json::Value::object();
+    root.set("version", 1).set("games", cacheGames(cachedOwned_));
+    xc::platform::writeFileAtomic(ownedCachePath_, root.dump());
+}
+
+void AppUi::setRecentCachePath(std::string path) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (recentCachePath_ == path) return;
+    }
+    auto loaded = readGameCache(path, "games");
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (recentCachePath_ == path) return;
+    recentCachePath_ = std::move(path);
+    recentGames_ = std::move(loaded);
+    if (tab_ == Tab::Recent && searching_) runSearch();
+    dirty_ = true;
+}
+
+void AppUi::setOwnedCachePath(std::string path) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (ownedCachePath_ == path) return;
+    }
+    auto loaded = readGameCache(path, "games");
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (ownedCachePath_ == path) return;
+    ownedCachePath_ = std::move(path);
+    cachedOwned_ = std::move(loaded);
+    ownedCacheLoaded_ = true;
+    allOwned_ = cloudLibraryMode_ ? std::vector<GameTile>{} : cachedOwned_;
+    if (!cloudLibraryMode_) rebuild();
+    dirty_ = true;
+}
+
+void AppUi::setCloudLibrary(std::vector<GameTile> titles, bool complete) {
     // Prepare the account subset outside the UI lock; never fetch ownership here.
     std::vector<GameTile> owned;
     for (const auto& tile : titles) if (tile.myGamesEligible || tile.accountOwned) owned.push_back(tile);
@@ -353,19 +445,42 @@ void AppUi::setCloudLibrary(std::vector<GameTile> titles) {
     std::lock_guard<std::mutex> lock(mutex_);
     cloudLibraryMode_ = true;
     allRows_ = {std::move(row)};
+    if (ownedCacheLoaded_ && !complete) {
+        auto same = [](const GameTile& a, const GameTile& b) {
+            if (!a.productId.empty() && !b.productId.empty()) return a.productId == b.productId;
+            return !a.titleId.empty() && a.titleId == b.titleId;
+        };
+        for (const auto& cached : cachedOwned_) {
+            if (std::none_of(owned.begin(), owned.end(), [&](const GameTile& live) { return same(cached, live); }))
+                owned.push_back(cached);
+        }
+    }
     allOwned_ = std::move(owned);
     allPurchasable_.clear();
     gamePassPool_ = std::move(titles);
     libraryPool_ = allOwned_;
     // Refresh cached recent entries as catalog metadata arrives, without
     // changing their launch order or adding games that were not launched.
+    bool recentMetadataChanged = false;
     for (auto& recent : recentGames_) {
         for (const auto& title : gamePassPool_) {
             const bool same = !recent.productId.empty() ? recent.productId == title.productId
                                                         : recent.titleId == title.titleId;
-            if (same) { recent = title; break; }
+            if (same) {
+                recentMetadataChanged = recent.name != title.name || recent.tileUrl != title.tileUrl ||
+                                        recent.heroUrl != title.heroUrl || recent.publisher != title.publisher;
+                recent = title;
+                break;
+            }
         }
     }
+    if (complete && ownedCacheLoaded_) {
+        // The completed server listing replaces the startup snapshot. Session
+        // creation still goes through the service, which is authoritative.
+        cachedOwned_ = allOwned_;
+        saveOwnedCacheLocked();
+    }
+    if (recentMetadataChanged) saveRecentCacheLocked();
     ownedKnown_ = true;
     rebuild(true);
 }
@@ -382,6 +497,7 @@ void AppUi::recordRecentGame(const GameTile& game) {
     recentGames_.insert(recentGames_.begin(), game);
     constexpr size_t kRecentLimit = 24;
     if (recentGames_.size() > kRecentLimit) recentGames_.resize(kRecentLimit);
+    saveRecentCacheLocked();
     dirty_ = true;
 }
 
@@ -396,6 +512,7 @@ void AppUi::removeRecentGame(const GameTile& game) {
     const size_t before = recentGames_.size();
     recentGames_.erase(std::remove_if(recentGames_.begin(), recentGames_.end(), sameGame), recentGames_.end());
     if (recentGames_.size() == before) return;
+    saveRecentCacheLocked();
     int visibleCount = 0;
     for (const auto& item : recentGames_) if (!hidden_.count(item.productId)) ++visibleCount;
     qtLibraryFocus_ = std::clamp(qtLibraryFocus_, 0, std::max(0, visibleCount - 1));
@@ -992,6 +1109,13 @@ bool AppUi::settingsLightBar(int& mode, Color& colour) const {
     return true;
 }
 
+bool AppUi::lightBarChoice(int& mode, Color& colour) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    mode = pickerOpen_ ? 1 : settings_.lightBarMode;
+    colour = pickerOpen_ ? pickerColour() : settings_.lightBarColour;
+    return true;
+}
+
 bool AppUi::settingsTriggerFeel(int& strength, int& hzIndex, int& resistance, bool& pulses) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (screen_ != Screen::Settings && !gameSettingsOpen_) return false;
@@ -1160,6 +1284,14 @@ void AppUi::setSettings(const SettingsChoice& choice) {
     dirty_ = true;
 }
 
+void AppUi::setStreamResolution(int resolution) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    resolution = resolution == 1 ? 1 : 0;
+    if (settings_.resolution == resolution) return;
+    settings_.resolution = resolution;
+    dirty_ = true;
+}
+
 void AppUi::setPerGameSettings(const std::map<std::string, app::GameProfile>& perGame) {
     std::lock_guard<std::mutex> lock(mutex_);
     perGameSettings_ = perGame;
@@ -1270,7 +1402,8 @@ std::vector<std::string> AppUi::settingOptions(int row) const {
     if (row == 0) {
         for (int i = 0; i < static_cast<int>(Language::Count); ++i) out.push_back(languageName(static_cast<Language>(i)));
     } else if (row == 1) {
-        out = {tr(Str::Res720), tr(Str::Res1080), tr(Str::ResBest)};  // kResolutionOrder
+        out = {tr(Str::Res720), tr(Str::Res1080)};
+        if (!cloudLibraryMode_) out.push_back(tr(Str::ResBest));
     } else if (row == 3) {
         // Left and right stick (the tester changes them).
         out = {std::to_string(settings_.deadzone[0]) + " %  \xC2\xB7  " + std::to_string(settings_.deadzone[1]) + " %"};
@@ -1282,6 +1415,8 @@ std::vector<std::string> AppUi::settingOptions(int row) const {
     } else if (row == 6) {
         out = {tr(Str::LightBarGame), tr(Str::LightBarCustom), tr(Str::Deactivated)};
     } else if (row == 7) {
+        out = {tr(Str::On), tr(Str::Off)};
+    } else if (row == 8) {
         // Updates: Cross acts, no list.
     } else {
         // Automatic first, then the regions in the login's order.
@@ -1296,6 +1431,7 @@ int AppUi::settingSelected(int row) const {
     // Caller holds mutex_.
     if (row == 0) return settings_.language;
     if (row == 1) {
+        if (cloudLibraryMode_) return settings_.resolution == 1 ? 0 : 1;
         for (int i = 0; i < 3; ++i)
             if (kResolutionOrder[i] == settings_.resolution) return i;
     }
@@ -1303,7 +1439,8 @@ int AppUi::settingSelected(int row) const {
     if (row == 4) return settings_.triggerStrength;
     if (row == 5) return settings_.circleConfirms ? 1 : 0;
     if (row == 6) return settings_.lightBarMode;
-    if (row == 7) return 0;
+    if (row == 7) return settings_.showDockTutorial ? 0 : 1;
+    if (row == 8) return 0;
     for (size_t i = 0; i < regions_.size(); ++i)
         if (regions_[i] == settings_.region) return static_cast<int>(i) + 1;
     return 0;
@@ -1326,6 +1463,8 @@ void AppUi::applySetting(int row, int index) {
     } else if (row == 6) {
         settings_.lightBarMode = index;
     } else if (row == 7) {
+        settings_.showDockTutorial = index == 0;
+    } else if (row == 8) {
     } else {
         settings_.region = index == 0 ? std::string() : regions_[static_cast<size_t>(index - 1)];
     }
@@ -2073,6 +2212,15 @@ UiEvent AppUi::handle(const NavInput& in) {
         }
         return ev;
     }
+    const Screen previousScreen = screen_;
+    const Tab previousTab = tab_;
+    const bool previousSearching = searching_;
+    const bool previousSearchOnKeys = searchOnKeys_;
+    const bool previousGameSettings = gameSettingsOpen_;
+    const bool previousDropdown = dropdownOpen_;
+    const bool previousPicker = pickerOpen_;
+    const Tester previousTester = tester_;
+    const int previousFilterList = filterList_;
     switch (screen_) {
         case Screen::Home: handleHome(in, ev); break;
         case Screen::Settings:
@@ -2103,7 +2251,7 @@ UiEvent AppUi::handle(const NavInput& in) {
             if (in.accept && (settingsRow_ == 3 || settingsRow_ == 4)) {
                 // Dead zone, trigger vibration: their testers instead of a list.
                 openTester(settingsRow_ == 3 ? Tester::Sticks : Tester::Triggers);
-            } else if (in.accept && settingsRow_ == 7) {
+            } else if (in.accept && settingsRow_ == 8) {
                 // Updates: a newer version is installed (the settings saved first).
                 if (!updateAvailable_.empty() && !updateChecking_) {
                     ev.action = Action::UpdateNow;
@@ -2183,6 +2331,15 @@ UiEvent AppUi::handle(const NavInput& in) {
         if (signOutHoldStart_) dirty_ = true;
         signOutHoldStart_ = 0;
         if (!in.touchpad) signOutLatched_ = false;
+    }
+    const bool menuChanged = previousScreen != screen_ || previousTab != tab_ ||
+                             previousSearching != searching_ || previousSearchOnKeys != searchOnKeys_ ||
+                             previousGameSettings != gameSettingsOpen_ || previousDropdown != dropdownOpen_ ||
+                             previousPicker != pickerOpen_ || previousTester != tester_ ||
+                             previousFilterList != filterList_;
+    if (menuChanged && previousScreen != Screen::Streaming && screen_ != Screen::Streaming) {
+        menuTransitionStartMs_ = in.nowMs;
+        menuTransitionActive_ = true;
     }
     return ev;
 }
@@ -2267,50 +2424,58 @@ static void drawFaceButton(Canvas& c, int icon, float cx, float cy, float r) {
     }
 }
 
-void AppUi::drawHints(Canvas& c, const std::vector<std::pair<int, const char*>>& hints) {
-    // Right-aligned PlayStation button glyphs with labels.
-    constexpr int kPx = 22, kR = 14, kGap = 36;
-    int x = kW - kMargin;
-    const int y = kH - 64;
-    for (auto it = hints.rbegin(); it != hints.rend(); ++it) {
-        // With Circle confirming, the pad reports it as Cross (and the
-        // other way round): the hints show the button to press.
-        int icon = it->first;
+void AppUi::drawHints(Canvas& c, const std::vector<std::pair<int, const char*>>& hints, int y) {
+    struct Hint { int icon; const char* label; int iconWidth; };
+    std::vector<Hint> items;
+    items.reserve(hints.size());
+    int totalLabels = 0;
+    for (const auto& hint : hints) {
+        int icon = hint.first;
         if (circleConfirms_ && (icon == kIconCross || icon == kIconCircle))
             icon = icon == kIconCross ? kIconCircle : kIconCross;
-        int w = fonts_.semibold.measure(it->second, kPx);
-        x -= w;
-        fonts_.semibold.draw(c, it->second, x, y, kPx, kGray);
-        x -= 10 + 2 * kR;
-        float cx = x + kR, cy = y + 13;
-        if (icon == kIconR2) {
-            Rect pill{x - 6, static_cast<int>(cy) - 12, 2 * kR + 12, 24};
+        const int iw = icon == kIconL2R2 ? 74 : icon == kIconTouchpad ? 52 :
+                       (icon == kIconOptions ? 36 : (icon == kIconR2 || icon == kIconR3) ? 40 : 28);
+        items.push_back({icon, hint.second, iw});
+        totalLabels += fonts_.semibold.measure(hint.second, 22);
+    }
+    if (items.empty()) return;
+    int px = 22, gap = 30;
+    int iconWidths = 0;
+    for (const auto& item : items) iconWidths += item.iconWidth;
+    int required = totalLabels + iconWidths + static_cast<int>(items.size()) * 10 +
+                   static_cast<int>(items.size() - 1) * gap;
+    if (required > kW - 2 * kMargin) {
+        px = 19; gap = 16; totalLabels = 0;
+        for (const auto& item : items) totalLabels += fonts_.semibold.measure(item.label, px);
+    }
+    if (y < 0) y = kH - 64;
+    const float cy = static_cast<float>(y + 13);
+    int cursor = kW - kMargin;
+    for (auto it = items.rbegin(); it != items.rend(); ++it) {
+        const int labelW = fonts_.semibold.measure(it->label, px);
+        cursor -= labelW;
+        fonts_.semibold.draw(c, it->label, cursor, y, px, kGray);
+        cursor -= 10 + it->iconWidth;
+        const int iconLeft = cursor;
+        const float cx = iconLeft + it->iconWidth / 2.0f;
+        if (it->icon == kIconR2 || it->icon == kIconR3 || it->icon == kIconL2R2) {
+            const char* text = it->icon == kIconR2 ? "R2" : it->icon == kIconR3 ? "R3" : "L2 R2";
+            Rect pill{iconLeft, static_cast<int>(cy) - 12, it->iconWidth, 24};
             c.fillRect(pill, rgba(255, 255, 255, 40), 8);
-            fonts_.bold.draw(c, "R2", pill.x + (pill.w - fonts_.bold.measure("R2", 14)) / 2,
-                             fonts_.bold.centeredY(pill.y, pill.h, 14), 14, kGray);
-        } else if (icon == kIconL2R2) {
-            Rect pill{x - 40, static_cast<int>(cy) - 12, 2 * kR + 46, 24};
-            c.fillRect(pill, rgba(255, 255, 255, 40), 8);
-            fonts_.bold.draw(c, "L2 R2", pill.x + (pill.w - fonts_.bold.measure("L2 R2", 14)) / 2,
-                             fonts_.bold.centeredY(pill.y, pill.h, 14), 14, kGray);
-            x -= 34;
-        } else if (icon == kIconR3) {
-            Rect pill{x - 6, static_cast<int>(cy) - 12, 2 * kR + 12, 24};
-            c.fillRect(pill, rgba(255, 255, 255, 40), 8);
-            fonts_.bold.draw(c, "R3", pill.x + (pill.w - fonts_.bold.measure("R3", 14)) / 2,
-                             fonts_.bold.centeredY(pill.y, pill.h, 14), 14, kGray);
-        } else if (icon == kIconTouchpad) {
-            Rect pad{x - 18, static_cast<int>(cy) - 10, 2 * kR + 12, 20};
+            const int textPx = 14;
+            fonts_.bold.draw(c, text, pill.x + (pill.w - fonts_.bold.measure(text, textPx)) / 2,
+                             fonts_.bold.centeredY(pill.y, pill.h, textPx), textPx, kGray);
+        } else if (it->icon == kIconTouchpad) {
+            Rect pad{iconLeft, static_cast<int>(cy) - 10, it->iconWidth, 20};
             c.fillRect(pad, rgba(255, 255, 255, 40), 6);
             c.strokeRect(pad, kGray, 2, 6);
-            x -= 10;
-        } else if (icon == kIconOptions) {
-            c.fillRect({x - 4, static_cast<int>(cy) - 11, 2 * kR + 8, 22}, rgba(255, 255, 255, 40), 11);
+        } else if (it->icon == kIconOptions) {
+            c.fillRect({iconLeft, static_cast<int>(cy) - 11, it->iconWidth, 22}, rgba(255, 255, 255, 40), 11);
             for (int k = -1; k <= 1; ++k) c.line(cx - 8, cy + k * 5, cx + 8, cy + k * 5, 2, kGray);
         } else {
-            drawFaceButton(c, icon, cx, cy, kR);
+            drawFaceButton(c, it->icon, cx, cy, 14);
         }
-        x -= kGap;
+        cursor -= gap;
     }
 }
 
@@ -2800,8 +2965,16 @@ void AppUi::drawQtLibrary(Canvas& c, uint64_t nowMs) {
             fonts_.regular.draw(c, fonts_.regular.fit(accessLabel, 16, 360), heroTextX + 310, btnY + 15, 16,
                                 selectedTile->playable ? muted : quiet);
         } else {
-            const char* emptyMessage = tab_ == Tab::Recent ? tr(Str::NoRecentGames) : tr(Str::NoGames);
-            fonts_.semibold.draw(c, fonts_.semibold.fit(emptyMessage, 26, 1728), 96, 402 - pageOffset, 26, muted);
+            if (tab_ == Tab::Library && loading_) {
+                drawSpinner(c, kW / 2.0f, 354 - pageOffset, 26, nowMs);
+                const char* loading = tr(Str::LoadingGames);
+                const int textW = fonts_.semibold.measure(loading, 26);
+                fonts_.semibold.draw(c, loading, (kW - textW) / 2, 402 - pageOffset, 26, muted);
+                animating_ = true;
+            } else {
+                const char* emptyMessage = tab_ == Tab::Recent ? tr(Str::NoRecentGames) : tr(Str::NoGames);
+                fonts_.semibold.draw(c, fonts_.semibold.fit(emptyMessage, 26, 1728), 96, 402 - pageOffset, 26, muted);
+            }
         }
     }
 
@@ -2868,45 +3041,35 @@ void AppUi::drawQtLibrary(Canvas& c, uint64_t nowMs) {
             drawLock(c, x + cardW - 30, cy + 28);
         }
         c.strokeRect({x, cy, cardW, cardH}, focused ? accent : rgba(255,255,255,32), focused ? 2 : 1, 4);
-        if (focused) {
-            // Keep the current game's preview attached to its square cover;
-            // it changes with focus and never occupies a separate fixed pane.
-            constexpr int infoH = 66;
-            c.fillRect({x + 4, cy + cardH - infoH - 4, cardW - 8, infoH}, rgba(10, 12, 11, 224), 4);
-            fonts_.semibold.draw(c, fonts_.semibold.fit(tile.name, 17, cardW - 24), x + 12,
-                                 cy + cardH - infoH + 7, 17, ink);
-            const std::string& preview = !tile.publisher.empty() ? tile.publisher :
-                                         !tile.categories.empty() ? tile.categories.front() : tile.platform;
-            if (!preview.empty())
-                fonts_.regular.draw(c, fonts_.regular.fit(preview, 13, cardW - 24), x + 12,
-                                    cy + cardH - 28, 13, muted);
-        } else {
-            fonts_.semibold.draw(c, fonts_.semibold.fit(tile.name, 18, cardW), x, cy + cardH + 17, 18, muted);
-        }
+        // Keep captions outside the artwork for every card, including the
+        // focused one. Drawing the focused title and publisher over the cover
+        // made the selected game look like its caption was part of the image.
+        fonts_.semibold.draw(c, fonts_.semibold.fit(tile.name, 18, cardW), x,
+                             cy + cardH + 17, 18, focused ? ink : muted);
     }
     c.resetClip();
     // Remaining space mirrors the airy prototype and carries no extra cards.
     c.gradientV({0, 972, kW, 108}, rgba(17,20,18,0), bg);
-    c.fillRect({0, 1035, kW, 45}, bg);
+    c.fillRect({0, 1024, kW, 56}, bg);
     if (compactGrid || qtLibraryGridFocus_) {
         drawHints(c, {{kIconCross, tr(Str::Select)},
                       {kIconSquare, tr(tab_ == Tab::Recent ? Str::RemoveRecent :
                                        selectedTile && hidden_.count(selectedTile->productId)
                                            ? Str::Unhide : Str::Hide)},
                       {kIconTriangle, tr(Str::TabSearch)},
-                      {kIconOptions, tr(Str::Settings)}});
+                      {kIconOptions, tr(Str::Settings)}}, kH - 40);
     } else if (qtLibraryControlFocus_ >= 0) {
         drawHints(c, {{kIconCross, tr(Str::Select)},
-                      {kIconOptions, tr(Str::Settings)}});
+                      {kIconOptions, tr(Str::Settings)}}, kH - 40);
     } else {
         if (tab_ == Tab::Recent)
             drawHints(c, {{kIconCross, tr(Str::Select)}, {kIconSquare, tr(Str::RemoveRecent)},
-                          {kIconTriangle, tr(Str::TabSearch)}, {kIconOptions, tr(Str::Settings)}});
+                          {kIconTriangle, tr(Str::TabSearch)}, {kIconOptions, tr(Str::Settings)}}, kH - 40);
         else
             drawHints(c, {{kIconCross, tr(Str::Select)},
                           {kIconTriangle, tr(Str::TabSearch)},
                           {kIconOptions, tr(Str::Settings)},
-                          {kIconTouchpad, tr(Str::HoldSignOut)}});
+                          {kIconTouchpad, tr(Str::HoldSignOut)}}, kH - 40);
     }
     drawToast(c, nowMs);
 }
@@ -2940,8 +3103,10 @@ void AppUi::drawQtConsoles(Canvas& c, uint64_t nowMs) {
         c.strokeRect({96, 235, 1728, 565}, rgba(255, 255, 255, 28), 1, 12);
         if (!consolesKnown_) {
             drawSpinner(c, kW / 2.0f, 454, 30, nowMs);
-            fonts_.semibold.draw(c, tr(Str::ConsolesLoading), 96, 527, 28, muted);
-            fonts_.regular.draw(c, tr(Str::ConsoleSearchStatus), 96, 570, 18, quiet);
+            const std::string loading = fonts_.semibold.fit(tr(Str::ConsolesLoading), 28, 1500);
+            const std::string status = fonts_.regular.fit(tr(Str::ConsoleSearchStatus), 18, 1500);
+            fonts_.semibold.draw(c, loading, (kW - fonts_.semibold.measure(loading, 28)) / 2, 527, 28, muted);
+            fonts_.regular.draw(c, status, (kW - fonts_.regular.measure(status, 18)) / 2, 570, 18, quiet);
             animating_ = true;
         } else {
             fonts_.semibold.draw(c, tr(Str::NoConsoles), 144, 328, 32, ink);
@@ -3739,10 +3904,10 @@ void AppUi::drawSettings(Canvas& c) {
     fonts_.bold.draw(c, tr(Str::Settings), kMargin, 170, 60, kWhite);
     const char* labels[kSettingRows] = {tr(Str::Language),      tr(Str::Resolution),    tr(Str::Region),
                                         tr(Str::Deadzone),      tr(Str::TriggerRumble), tr(Str::ConfirmButton),
-                                        tr(Str::LightBar),      tr(Str::Updates)};
-    constexpr int kRowW = 1200, kRowH = 66;
+                                        tr(Str::LightBar),      tr(Str::DockTutorial), tr(Str::Updates)};
+    constexpr int kRowW = 1200, kRowH = 58;
     Rect rows[kSettingRows];
-    int y = 262;
+    int y = 230;
     for (int i = 0; i < kSettingRows; ++i) {
         Rect r{kMargin, y, kRowW, kRowH};
         rows[i] = r;
@@ -3751,7 +3916,7 @@ void AppUi::drawSettings(Canvas& c) {
         if (focused && !dropdownOpen_) c.strokeRect({r.x - 5, r.y - 5, r.w + 10, r.h + 10}, kWhite, 3, 20);
         int ty = fonts_.semibold.centeredY(r.y, r.h, 30);
         fonts_.semibold.draw(c, labels[i], r.x + 36, ty, 30, kWhite);
-        if (i == 7) {
+        if (i == 8) {
             // Updates: the state; Cross updates when there is a newer version.
             std::string value = updateChecking_            ? tr(Str::UpdateChecking)
                                 : !updateAvailable_.empty() ? trf(Str::UpdateReady, updateAvailable_)
@@ -4222,6 +4387,16 @@ void AppUi::render(Canvas& c, uint64_t nowMs) {
     if (screen_ == Screen::Home && updatePrompt_) drawUpdatePrompt(c);
     if ((screen_ == Screen::Home && !updatePrompt_) || screen_ == Screen::Error) drawSignOutHold(c, nowMs);
     if (!toast_.empty()) animating_ = true;  // to expire it
+    if (menuTransitionActive_) {
+        constexpr uint64_t kMenuTransitionMs = 220;
+        const uint64_t elapsed = nowMs >= menuTransitionStartMs_ ? nowMs - menuTransitionStartMs_ : 0;
+        const float t = std::clamp(static_cast<float>(elapsed) / static_cast<float>(kMenuTransitionMs), 0.0f, 1.0f);
+        const float eased = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+        const int alpha = static_cast<int>(std::lround(72.0f * (1.0f - eased)));
+        if (alpha > 0) c.fillRect({0, 0, kW, kH}, rgba(0, 0, 0, alpha));
+        if (t >= 1.0f) menuTransitionActive_ = false;
+        else animating_ = true;
+    }
 }
 
 }  // namespace xc::ui

@@ -154,6 +154,7 @@ target_include_directories(xcloud_homebrew PRIVATE
   "${_xc_repo_root}/deps/opus/include"
   "${_vkloader_dir}"
   "${_xc_repo_root}/deps/libdatachannel/include"
+  "${_xc_repo_root}/deps/mbedtls/include"
   "${ORBIS_MESA_SRC}/include")
 target_compile_definitions(xcloud_homebrew PRIVATE
   "PSBOX_BUILD_LABEL=\"PSBOX-PS4-v${PROJECT_VERSION}-build${PSBOX_BUILD_NUMBER}\"")
@@ -211,7 +212,7 @@ if(COMMAND ps4_create_pkg)
   ps4_create_pkg(xcloud_homebrew
     TITLE_ID PSBX00001
     TITLE "PSBOX"
-    VERSION 00.03
+    VERSION 00.04
     CONTENT_LABEL PSBOXPS4
     ICON "${CMAKE_CURRENT_LIST_DIR}/../assets/ps4/icon0.png"
     EXTRA_FILES

@@ -69,6 +69,14 @@ if [[ ! "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]]; then
   printf 'PSBOX_BUILD_JOBS must be a positive integer (got: %s)\n' "$BUILD_JOBS" >&2
   exit 2
 fi
+if [[ ! "$PSBOX_BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
+  printf 'PSBOX_BUILD_NUMBER must be numeric (got: %s)\n' "$PSBOX_BUILD_NUMBER" >&2
+  exit 2
+fi
+if [[ ! "$PSBOX_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  printf 'VERSION must use numeric semantic versioning (got: %s)\n' "$PSBOX_VERSION" >&2
+  exit 2
+fi
 if [[ "$PSBOX_LIBRARY_LAYOUT" != NEW && "$PSBOX_LIBRARY_LAYOUT" != LEGACY ]]; then
   printf 'PSBOX_LIBRARY_LAYOUT must be NEW or LEGACY (got: %s)\n' "$PSBOX_LIBRARY_LAYOUT" >&2
   exit 2
@@ -113,8 +121,20 @@ cmake -S "$ROOT/ps4-homebrew" -B "$BUILD_DIR" -G Ninja \
 ninja -C "$BUILD_DIR" -j"$BUILD_JOBS" xcloud_homebrew
 PKG_PATH="$BUILD_DIR/PSBX00001.pkg"
 RELEASE_PKG="$BUILD_DIR/PSBOX-${PSBOX_VERSION}-beta-b${PSBOX_BUILD_NUMBER}.pkg"
-if [[ -e "$PKG_PATH" ]]; then
-  cp -f "$PKG_PATH" "$RELEASE_PKG"
+if [[ ! -s "$PKG_PATH" ]]; then
+  printf 'Build completed without a non-empty PKG: %s\n' "$PKG_PATH" >&2
+  exit 1
+fi
+if [[ -e "$RELEASE_PKG" ]]; then
+  if cmp -s "$PKG_PATH" "$RELEASE_PKG"; then
+    printf 'Versioned PKG already exists with identical contents; keeping it unchanged.\n'
+  else
+    printf 'Refusing to overwrite existing build artifact: %s\n' "$RELEASE_PKG" >&2
+    printf 'Increment BUILD_NUMBER before creating a different package.\n' >&2
+    exit 1
+  fi
+else
+  cp -- "$PKG_PATH" "$RELEASE_PKG"
 fi
 printf '\nBuilt: %s/xcloud_homebrew\n' "$BUILD_DIR"
 printf 'PKG:   %s\n' "$RELEASE_PKG"

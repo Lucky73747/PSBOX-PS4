@@ -1062,12 +1062,16 @@ PresentationHeartbeat presentationHeartbeat() {
 
             // User choices are absolute EASU target resolutions, independent of RTP source tier.
             // The display remains unchanged; larger intermediates are resolved back to it.
+            // Native 1:1 output (upscaler == 2) is a hard bypass: it must never
+            // enter either the EASU shader path or the RCAS render pass.
+            const bool fsrSelected = updateResult.upscaler == 1;
+            const bool nativeOneToOne = updateResult.upscaler == 2;
             const bool sourceIs1080p = lastVideoWidth == 1920 && lastVideoHeight == 1080;
             const bool outputIs1080p = extent.width == 1920 && extent.height == 1080;
             const uint32_t targetHeight = updateResult.fsrTargetHeight == 1440 || updateResult.fsrTargetHeight == 2160
                 ? updateResult.fsrTargetHeight : 1080;
             const VkExtent2D requestedTarget{targetHeight * 16 / 9, targetHeight};
-            const bool requestedIntermediate = updateResult.upscaler == 1 &&
+            const bool requestedIntermediate = fsrSelected && !nativeOneToOne &&
                 requestedTarget.width > extent.width && requestedTarget.height > extent.height &&
                 requestedTarget.width >= static_cast<uint32_t>(lastVideoWidth) &&
                 requestedTarget.height >= static_cast<uint32_t>(lastVideoHeight);
@@ -1077,7 +1081,7 @@ PresentationHeartbeat presentationHeartbeat() {
                 extent.height >= lastVideoHeight &&
                 (extent.width > lastVideoWidth || extent.height > lastVideoHeight);
             const bool nativeRcas1080p = updateResult.nativeRcas && updateResult.requested1080p && sourceIs1080p && outputIs1080p;
-            const bool doRcas = gpuVideoHasFrame && updateResult.videoActive && updateResult.upscaler == 1 &&
+            const bool doRcas = gpuVideoHasFrame && updateResult.videoActive && fsrSelected && !nativeOneToOne &&
                 (supersample2x || strictUpscale || nativeRcas1080p);
             const VkExtent2D videoPassExtent = doRcas && supersample2x ? gpuVideo.supersampleExtent : extent;
             if (doRcas) {
@@ -1117,11 +1121,12 @@ PresentationHeartbeat presentationHeartbeat() {
             params.gpuUi = ((gpuUiShapes && updateResult.videoActive) || doRcas) ? 1 : 0;
             const uint32_t matrixCode = static_cast<uint32_t>(activeVideoColor.matrix) & 3u;
             const uint32_t colorFlags = matrixCode | (activeVideoColor.fullRange ? 4u : 0u);
-            params.padding = static_cast<int32_t>(std::min(updateResult.rcasSharpness,4u) |
+            const uint32_t effectiveRcasSharpness = doRcas ? std::min(updateResult.rcasSharpness, 4u) : 0u;
+            params.padding = static_cast<int32_t>(effectiveRcasSharpness |
                                                    (supersample2x ? 32u : 0u) |
                                                    (colorFlags << 8));
             params.targetWidth = videoPassExtent.width; params.targetHeight = videoPassExtent.height;
-            params.upscaler = updateResult.upscaler == 1 ? 1 : 0;
+            params.upscaler = fsrSelected && !nativeOneToOne ? 1 : 0;
             params.width = static_cast<int32_t>(lastVideoWidth);
             params.height = static_cast<int32_t>(lastVideoHeight);
             params.enabled = gpuVideoHasFrame && updateResult.videoActive ? 1 : 0;
@@ -1168,17 +1173,17 @@ PresentationHeartbeat presentationHeartbeat() {
             if (scalerChanged) {
                 for (int i=0; i<10; ++i) previousScaler[i] = scalerState[i];
                 logLine("gpu_scaler selected=%s effective=%s source=%dx%d easu_target=%ux%u output=%dx%d requested_easu_height=%u requested_tier_1080p=%u supersample_active=%u video_enabled=%d easu_active=%u native_rcas_1080_enabled=%u source_is_1080p=%u rcas_active=%u rcas_level=%u rcas_sharpness_pct=%u rcas_stops=%.1f resolve=four_tap_linear denoise=on shader=rgb_active_bounds",
-                    updateResult.upscaler == 2 ? "native-1to1" : updateResult.upscaler == 1 ? "fsr1-easu-rcas" : "bilinear",
-                    !params.enabled ? "inactive" : updateResult.upscaler == 2 ? "native-1to1-no-scaling" :
+                    nativeOneToOne ? "native-1to1" : fsrSelected ? "fsr1-easu-rcas" : "bilinear",
+                    !params.enabled ? "inactive" : nativeOneToOne ? "native-1to1-no-scaling" :
                         supersample2x ? "fsr1-easu-target+rcas-downsample" :
                         doRcas ? (easuActive ? "fsr1-easu-rgb+rcas" : "native-rgb+rcas") : "bilinear",
                     params.width, params.height, params.targetWidth, params.targetHeight,
                     outputWidth, outputHeight, updateResult.fsrTargetHeight, updateResult.requested1080p ? 1u : 0u,
                     supersample2x ? 1u : 0u, params.enabled, easuActive ? 1u : 0u,
                     nativeRcas1080p ? 1u : 0u, sourceIs1080p ? 1u : 0u, doRcas ? 1u : 0u,
-                    static_cast<unsigned>(params.padding) & 7u,
-                    (4u - (static_cast<unsigned>(params.padding) & 7u)) * 25u,
-                    (static_cast<unsigned>(params.padding) & 7u) * 0.5);
+                    effectiveRcasSharpness,
+                    (4u - effectiveRcasSharpness) * 25u,
+                    effectiveRcasSharpness * 0.5);
             }
             static int previousColorFlags = -1;
             const int colorState = static_cast<int>(colorFlags) |

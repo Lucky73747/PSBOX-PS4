@@ -3,7 +3,7 @@
   "recorded": "2026-10-19",
   "scope": "Selected local link inputs, headers and notices plus the release-specific corresponding-source bundle; not a complete reproducible-build manifest",
   "external_files_redistributed": false,
-  "source_availability": "PSBOX application and PRX sources are in the public source export; source snapshots for external linked static components are attached to GitHub release v0.1.1-beta.1. The SDK/toolchain bundle itself is excluded; see LICENSE-STATUS.md.",
+  "source_availability": "PSBOX application and PRX sources are in the public source export; source snapshots for the exact selected external linked static components are attached to GitHub release v0.1.1-beta.2. The SDK/toolchain bundle itself is excluded; see LICENSE-STATUS.md.",
   "files": [
     {
       "component": "sdk-bundle",
@@ -229,10 +229,10 @@
     }
   ],
   "release_artifacts": {
-    "release": "v0.1.1-beta.1",
-    "package": "PSBOX-0.1.1-beta-b18.pkg",
-    "package_sha256": "f350010621c35c6b362ed5b63e8b35bbe72349de9f5c098024fd3f7526dfae19",
-    "corresponding_source_archive": "PSBOX-0.1.1-beta-b18-CORRESPONDING-SOURCE.tar.gz",
-    "corresponding_source_sha256": "f4d9e5a6a2e0f7eace9ecb70acb6510718b8c8d5bd505d5e468dcbadffb3ed41"
+    "release": "v0.1.1-beta.2",
+    "package": "PSBOX-0.1.1-beta-b26.pkg",
+    "package_sha256": "1857d8afcc8a0050d8d4ba7d73ce10ebb01af34bdfe08c17882c7392e4daedb0",
+    "corresponding_source_archive": "PSBOX-0.1.1-beta-b26-CORRESPONDING-SOURCE.tar.gz",
+    "corresponding_source_sha256": "3c479acc7606a9584d70751d9ea0b77baa7782a503e0b79f38a0c3bb2e404638"
   }
 }

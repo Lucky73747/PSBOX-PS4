@@ -259,6 +259,8 @@ constexpr Column kEnglish = {
     "Setup guide", // SetupGuide
     "Remove from Recent", // RemoveRecent
     "Removed from Recent", // RecentRemovedToast
+    "Dock tutorial", // DockTutorial
+    "Hold OPTIONS for 0.7 seconds to open the PSBOX dock", // DockTutorialHint
 };
 
 constexpr Column kPortugueseBR = {
@@ -487,6 +489,8 @@ constexpr Column kPortugueseBR = {
     "Guia de configuração", // SetupGuide
     "Remover dos recentes", // RemoveRecent
     "Removido dos recentes", // RecentRemovedToast
+    "Tutorial da dock", // DockTutorial
+    "Segure OPTIONS por 0,7 s para abrir a dock do PSBOX", // DockTutorialHint
 };
 
 constexpr Column kSpanish = {
@@ -715,6 +719,8 @@ constexpr Column kSpanish = {
     "Guía de configuración", // SetupGuide
     "Quitar de recientes", // RemoveRecent
     "Quitado de recientes", // RecentRemovedToast
+    "Tutorial del menú", // DockTutorial
+    "Mantén OPTIONS durante 0,7 s para abrir el menú de PSBOX", // DockTutorialHint
 };
 
 constexpr Column kFrench = {
@@ -943,6 +949,8 @@ constexpr Column kFrench = {
     "Guide de configuration", // SetupGuide
     "Retirer des récents", // RemoveRecent
     "Retiré des récents", // RecentRemovedToast
+    "Aide du menu", // DockTutorial
+    "Maintenez OPTIONS 0,7 s pour ouvrir le menu PSBOX", // DockTutorialHint
 };
 
 constexpr Column kGerman = {
@@ -1171,6 +1179,8 @@ constexpr Column kGerman = {
     "Einrichtungsanleitung", // SetupGuide
     "Aus den zuletzt verwendeten entfernen", // RemoveRecent
     "Aus den zuletzt verwendeten entfernt", // RecentRemovedToast
+    "Menü-Hinweis", // DockTutorial
+    "Halte OPTIONS 0,7 Sekunden, um das PSBOX-Menü zu öffnen", // DockTutorialHint
 };
 
 constexpr Column kItalian = {
@@ -1399,6 +1409,8 @@ constexpr Column kItalian = {
     "Guida alla configurazione", // SetupGuide
     "Rimuovi dai recenti", // RemoveRecent
     "Rimosso dai recenti", // RecentRemovedToast
+    "Suggerimento menu", // DockTutorial
+    "Tieni premuto OPTIONS per 0,7 s per aprire il menu PSBOX", // DockTutorialHint
 };
 
 constexpr std::array<const Column*, kLangs> kTable = {&kEnglish, &kPortugueseBR, &kSpanish,

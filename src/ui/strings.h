@@ -235,6 +235,8 @@ enum class Str {
     SetupGuide,
     RemoveRecent,
     RecentRemovedToast,
+    DockTutorial,
+    DockTutorialHint,
     Count
 };
 

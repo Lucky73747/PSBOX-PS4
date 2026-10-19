@@ -114,6 +114,7 @@ struct SettingsChoice {
     bool circleConfirms = false;  // Circle is Xbox A (and Cross is B)
     int lightBarMode = 0;         // 0 the game's colour, 1 lightBarColour, 2 off
     Color lightBarColour = rgba(0, 112, 220);
+    bool showDockTutorial = true;
     int sharpness = 0;
     int deband = 3;
     int upscaler = 2;
@@ -121,7 +122,7 @@ struct SettingsChoice {
 
 // The largest stick dead zone Settings offers, in percent of the travel.
 constexpr int kMaxDeadzone = 30;
-constexpr int kSettingRows = 8;  // language, resolution, region, dead zone, triggers, confirm, light bar, updates
+constexpr int kSettingRows = 9;  // language, resolution, region, controls, light bar, dock tutorial, updates
 
 // ConsolesShown: "My consoles" opened (its list is refreshed). UpdateNow
 // (with the settings, saved first when it came from Settings) / UpdateLater:
@@ -171,8 +172,11 @@ public:
     // while the account's games load.
     void setOwned(std::vector<GameTile> owned, std::vector<GameTile> purchasable, bool known);
     // Replaces the streaming library while preserving the focused game and screen.
-    void setCloudLibrary(std::vector<GameTile> titles);
-    // Records a title when its stream is launched; recent history lasts for this app run.
+    void setCloudLibrary(std::vector<GameTile> titles, bool complete = false);
+    // Disk caches are optional and scoped by the caller (PS4 uses account-specific paths).
+    void setRecentCachePath(std::string path);
+    void setOwnedCachePath(std::string path);
+    // Records a title when its stream is launched; history is persisted when configured.
     void recordRecentGame(const GameTile& game);
     // "My consoles"; `known` false while they load.
     void setConsoles(std::vector<ConsoleTile> consoles, bool known);
@@ -215,6 +219,8 @@ public:
     // on the phone meanwhile): Cross plays it again, Circle opens its page.
     void showPlayError(const std::string& message, const GameTile& game);
     void setSettings(const SettingsChoice& choice);
+    // Keep the shared stream-resolution choice in sync with the in-game menu.
+    void setStreamResolution(int resolution);
     // Per-game settings
     void setPerGameSettings(const std::map<std::string, app::GameProfile>& perGame);
     bool gameSettingsOpen() const { return gameSettingsOpen_; }
@@ -236,6 +242,8 @@ public:
     // While Settings is open: the light bar being chosen there (the colour
     // picker's colour as it moves), so the pad shows it at once.
     bool settingsLightBar(int& mode, Color& colour) const;
+    // Effective light bar choice, including the live Settings colour preview.
+    bool lightBarChoice(int& mode, Color& colour) const;
     // The same for the trigger vibration (strength, frequency index), and,
     // while its tester is open, how far each trigger is pressed: the app
     // makes them vibrate as a game asking that much would.
@@ -285,6 +293,8 @@ private:
         void animateTo(float next, uint64_t nowMs, uint64_t durationMs);
         bool stepTimed(uint64_t nowMs);
     };
+    bool menuTransitionActive_ = false;
+    uint64_t menuTransitionStartMs_ = 0;
 
     const GameTile* focusedTile() const;
     void retarget();
@@ -293,7 +303,7 @@ private:
     // there: never another game's art in the meantime.
     bool drawHero(Canvas& c, uint64_t nowMs, const std::string& url, bool details);
     void drawTopBar(Canvas& c);
-    void drawHints(Canvas& c, const std::vector<std::pair<int, const char*>>& hints);
+    void drawHints(Canvas& c, const std::vector<std::pair<int, const char*>>& hints, int y = -1);
     void drawSpinner(Canvas& c, float cx, float cy, float r, uint64_t nowMs);
     void drawToast(Canvas& c, uint64_t nowMs);
     void drawPads(Canvas& c);
@@ -333,6 +343,9 @@ private:
     void toggleHidden(const GameTile& tile, UiEvent& ev);
     // Removes one entry from this run's Recent tab without hiding the title.
     void removeRecentGame(const GameTile& tile);
+    void saveRecentCacheLocked() const;
+    void saveOwnedCacheLocked() const;
+    static std::vector<GameTile> readGameCache(const std::string& path, const char* key);
     void prefsEvent(UiEvent& ev) const;
     // The filter buttons of the current tab's search.
     // The search's filters, in two rows: Free, Lowest price (in "Your games"
@@ -411,6 +424,9 @@ private:
     // As received, before hiding and sorting (rebuild() derives the above).
     std::vector<GameRow> allRows_;
     std::vector<GameTile> allOwned_, allPurchasable_;
+    std::string recentCachePath_, ownedCachePath_;
+    std::vector<GameTile> cachedOwned_;
+    bool ownedCacheLoaded_ = false;
     std::set<std::string> hidden_;
     bool loading_ = false;
     size_t loadingDone_ = 0, loadingTotal_ = 0;

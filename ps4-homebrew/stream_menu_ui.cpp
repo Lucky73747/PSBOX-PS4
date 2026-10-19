@@ -339,15 +339,17 @@ void fsr(Panel& p, int outputWidth, int outputHeight) {
     p.p.text(detail,26,p.y+40,10,kMuted);
 }
 void controls(Panel& p) {
-    p.group(uiText("Controller shortcuts", "Atalhos do controle"),6);
-    float y=p.row(uiText("Select / confirm", "Selecionar / confirmar"),-1);padButton(p.p,PadButton::Cross,323,y+15);
-    y=p.row(uiText("Back / cancel", "Voltar / cancelar"),-1);padButton(p.p,PadButton::Circle,323,y+15);
-    y=p.row(uiText("Open menu (0.7 s)", "Abrir menu (0,7 s)"),-1); padButton(p.p,PadButton::Options,321,y+15);
-    y=p.row(uiText("Switch panel", "Trocar painel"),-1);
-    padButton(p.p,PadButton::L1,280,y+15);padButton(p.p,PadButton::R1,323,y+15);
-    y=p.row(uiText("Guide", "Guia"),-1);padButton(p.p,PadButton::Touchpad,313,y+13);
-    y=p.row(uiText("Red card: end session", "Cartão vermelho: encerrar"),-1);
-    padButton(p.p,PadButton::Cross,323,y+15);
+    p.group(uiText("Controller shortcuts", "Atalhos do controle"),7,48);
+    float y=p.row(uiText("Select / confirm", "Selecionar / confirmar"),-1,48);padButton(p.p,PadButton::Cross,323,y+10);
+    y=p.row(uiText("Back / cancel", "Voltar / cancelar"),-1,48);padButton(p.p,PadButton::Circle,323,y+10);
+    y=p.row(uiText("Open menu (0.7 s)", "Abrir menu (0,7 s)"),-1,48); padButton(p.p,PadButton::Options,321,y+10);
+    y=p.row(uiText("Switch panel", "Trocar painel"),-1,48);
+    padButton(p.p,PadButton::L1,280,y+10);padButton(p.p,PadButton::R1,323,y+10);
+    y=p.row(uiText("Guide", "Guia"),-1,48);padButton(p.p,PadButton::Touchpad,313,y+9);
+    y=p.row(uiText("View / Back", "View / Voltar"),-1,48);
+    padButton(p.p,PadButton::L3,280,y+10);p.p.text("+",305,y+20,12,kMuted,true);padButton(p.p,PadButton::R3,323,y+10);
+    y=p.row(uiText("Red card: end session", "Cartão vermelho: encerrar"),-1,48);
+    padButton(p.p,PadButton::Cross,323,y+10);
 }
 
 void volume(Panel& p) {

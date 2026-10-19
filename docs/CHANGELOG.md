@@ -1,22 +1,46 @@
 # Changelog
 
-## 0.1.1 — Release candidate (Build 18)
+## 0.1.1 Beta — Build 26
+
+- Mapped **L3 + R3** to the Xbox **View/Back** input. The touchpad remains mapped to Guide; this chord no longer triggers the manual video reset.
+- Added a controller guide in English and Brazilian Portuguese, and documented the shortcut in the in-game controls card.
+- Persisted **Recent** games and the account-scoped **My Games** snapshot across launches; the library displays cached games while refreshing.
+- Added persistent controller light-bar settings and a localized, optional in-game dock tutorial.
+- Improved library loading feedback, captions, console-search alignment and menu transitions.
+- Ensured native 1:1 output bypasses both EASU and RCAS.
+- Package: `PSBOX-0.1.1-beta-b26.pkg`; title ID `PSBX00001`; installer version `00.04`.
+- Package SHA-256: `1857d8afcc8a0050d8d4ba7d73ce10ebb01af34bdfe08c17882c7392e4daedb0`.
+- Built locally and uploaded to the owner's PS4 for testing. This build has not yet been confirmed running on-console.
+
+## Português — 0.1.1 Beta — Build 26
+
+- **L3 + R3** agora envia o botão **View/Voltar** do controle Xbox. O touchpad continua como Guide; essa combinação não aciona mais o reset manual do vídeo.
+- Adicionado um guia de controles em inglês e português brasileiro, além da indicação do atalho no cartão de controles durante o jogo.
+- **Recentes** e o snapshot de **Meus jogos**, separado por conta, persistem entre inicializações; a biblioteca mostra os dados em cache enquanto atualiza.
+- Adicionadas configurações persistentes da barra de luz e um tutorial localizado e opcional para abrir a dock durante o jogo.
+- Melhorados o feedback de carregamento da biblioteca, as legendas, o alinhamento da busca por consoles e as transições dos menus.
+- Garantido que a escala nativa 1:1 não execute EASU nem RCAS.
+- Pacote: `PSBOX-0.1.1-beta-b26.pkg`; identificador `PSBX00001`; versão do instalador `00.04`.
+- SHA-256 do pacote: `1857d8afcc8a0050d8d4ba7d73ce10ebb01af34bdfe08c17882c7392e4daedb0`.
+- Compilado localmente e enviado ao PS4 do responsável para testes. Ainda não há confirmação de execução desta build no console.
+
+## 0.1.1 Beta — Build 18 (previous beta release)
 
 - Added a persistent artwork cache and expanded the library with **My Games** and **Recent** views.
 - Added library localization with English as the default, plus Brazilian Portuguese, Spanish, French, German and Italian.
 - Improved controller navigation in title search and added Circle to cancel a pending game launch request.
-- Reduced the full PKG from 38,862,848 bytes (build 17) to 34,340,864 bytes (build 18), an 11.6% reduction. The smaller package was tested on a PS4; broader release review is still pending.
+- Reduced the full PKG from 38,862,848 bytes (build 17) to 35,782,656 bytes (build 18), a 7.9% reduction. The owner reported that build 18 worked on a PS4.
 - Package: `PSBOX-0.1.1-beta-b18.pkg`; title ID `PSBX00001`; installer version `00.03`.
-- This is a release candidate. It has not been published as a GitHub release yet. Binary distribution review for the exact external SDK/toolchain inputs remains open; see [LICENSE-STATUS.md](LICENSE-STATUS.md).
+- Published as the `v0.1.1-beta.1` GitHub prerelease with corresponding-source materials.
 
-## Português — 0.1.1 candidata (Build 18)
+## Português — 0.1.1 Beta — Build 18 (versão beta anterior)
 
 - Adiciona cache persistente de artes e as abas **Meus jogos** e **Recentes**.
 - Adiciona idiomas à biblioteca: inglês padrão, português brasileiro, espanhol, francês, alemão e italiano.
 - Melhora a navegação por controle na busca de títulos e permite cancelar um pedido de início de jogo com Círculo.
-- Reduz o PKG completo de 38.862.848 bytes (build 17) para 34.340.864 bytes (build 18), uma redução de 11,6%. O pacote menor foi testado em um PS4; a revisão mais ampla da release ainda está pendente.
+- Reduz o PKG completo de 38.862.848 bytes (build 17) para 35.782.656 bytes (build 18), uma redução de 7,9%. O responsável pelo projeto informou que a build 18 funcionou em um PS4.
 - Pacote: `PSBOX-0.1.1-beta-b18.pkg`; identificador `PSBX00001`; versão do instalador `00.03`.
-- Esta é uma candidata à release e ainda não foi publicada no GitHub. A revisão de distribuição binária dos insumos externos exatos do SDK/toolchain continua pendente; consulte [LICENSE-STATUS.md](LICENSE-STATUS.md).
+- Publicada como pré-release `v0.1.1-beta.1` no GitHub, acompanhada dos materiais de código-fonte correspondente.
 
 ## 0.1.0 Beta — Build 1
 
