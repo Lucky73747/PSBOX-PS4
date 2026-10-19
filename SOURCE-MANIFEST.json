@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "created_utc": "2026-10-19T18:56:57.508430+00:00",
+  "created_utc": "2026-10-19T20:04:24.642412+00:00",
   "application": "PSBOX-PS4",
   "scope": "current selected source, including uncommitted changes",
   "history_included": false,
@@ -68,8 +68,8 @@
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
-      "size": 9556,
-      "sha256": "e722f353b922f585e551bb69635464b9efd444d9725994b7bd4dc99088e0eb61"
+      "size": 9915,
+      "sha256": "5fd3d95e434c5b05bf0a5ec809630434976b902256db87c3b00f5b0d45f31b99"
     },
     {
       "path": "VERSION",
@@ -14078,8 +14078,8 @@
     },
     {
       "path": "docs/LICENSE-STATUS.md",
-      "size": 3402,
-      "sha256": "f482b3bf0b0955319241f6554cba0c0230318ca207d717777ea89a0321d586ad"
+      "size": 3537,
+      "sha256": "67d2889c18b83ee1f837b85c7c496fc9646b22e23318de892326e4132d486f3c"
     },
     {
       "path": "docs/PS4-SOURCE-PROVENANCE-LICENSES.md",
@@ -14098,8 +14098,8 @@
     },
     {
       "path": "docs/external-inputs.json",
-      "size": 7813,
-      "sha256": "27de44edb0f6b8b8569cdc3857f9b75919ea27a348763e85870112d6234bf8b2"
+      "size": 8361,
+      "sha256": "a18fe7a5a31a64e3847576767250f11ef65f404f98ba2a4d701acc437936c64f"
     },
     {
       "path": "extern/anime4k/Anime4K_Restore_CNN_S.glsl",

@@ -53,14 +53,14 @@ The active PS4 target is defined by `ps4-homebrew/CMakeLists.txt`.
 | nlohmann/json | bundled headers | MIT and other retained notices; see `deps/libdatachannel/deps/json/LICENSES/`. |
 | qrcodegen | `extern/qrcodegen` | MIT; copyright and permission notice in source headers and README. |
 | stb_image, stb_image_resize2, stb_truetype | `extern/stb` | MIT or Unlicense; see `extern/stb/LICENSE` and file headers. |
-| SDL3 | External PS4 build input | zlib license; exact source/build and notice must accompany a redistributable binary. |
+| SDL3 | External PS4 build input; exact source snapshot is included in the `v0.1.1-beta.1` corresponding-source release asset | zlib license; `SDL/LICENSE.txt` is retained in that source snapshot. |
 | Opus | 1.5.2, upstream tag `v1.5.2`, commit `ddbe48383984d56acd9e1ab6a090c54ca6b735a6`, `deps/opus` | BSD-3-Clause; full notice in `deps/opus/COPYING`, embedded in the PS4 PKG as `licenses/Opus-COPYING`. |
-| Mesa RADV, zlib, OpenOrbis SDK/toolchain, orbis-porting-kit | External PS4 build inputs | Preserve the exact bundle's license, exception, notice, and per-file SPDX texts; there is no single blanket license. |
+| Mesa RADV, zlib, orbis-compat, orbis-porting-kit Vulkan loader, OpenOrbis musl CRT source | External PS4 build inputs; corresponding source snapshots for linked components are included in the `v0.1.1-beta.1` release asset | Preserve each component's license, exceptions, notices, and per-file SPDX texts; there is no single blanket license. The SDK/toolchain bundle itself is not distributed. |
 | AMD FidelityFX FSR1 | `extern/fsr1` | MIT; `extern/fsr1/LICENSE.txt`. |
 | Inter fonts | `assets/fonts` | SIL Open Font License 1.1; `assets/fonts/OFL.txt`. |
 | PSBOX icon/artwork | `assets/ps4/icon0.png`, project UI sources | Project code/artwork notice; GPL-3.0-or-later. |
 
-The PS4 recipe copies this notice, the project license, font notices and the public `licenses/` collection into newly built packages. The package includes OpenOrbis `libc.prx` and `libSceFios2.prx`; their corresponding source and GPL-3.0 license from OpenOrbis PS4 Toolchain v0.5.4 are retained under `licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/`. This does not include or resolve licensing for all external SDK inputs. See [docs/LICENSE-STATUS.md](docs/LICENSE-STATUS.md) before distributing a binary.
+The PS4 recipe copies this notice, the project license, font notices and the public `licenses/` collection into newly built packages. The package includes OpenOrbis `libc.prx` and `libSceFios2.prx`; their corresponding source and GPL-3.0 license from OpenOrbis PS4 Toolchain v0.5.4 are retained under `licenses/corresponding-source/OpenOrbis-PS4-Toolchain-v0.5.4/`. The b18 release's corresponding-source asset covers the additional external static link inputs listed above. The local SDK/toolchain bundle is not a release asset. See [docs/LICENSE-STATUS.md](docs/LICENSE-STATUS.md) for the exact distribution scope.
 
 ## PS5 files shipped in the app package
 
